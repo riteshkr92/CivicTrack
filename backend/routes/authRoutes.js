@@ -6,6 +6,7 @@ const multer = require('multer');
 const User = require('../models/User');
 const generateToken = require('../utils/generateToken');
 const { authenticate, authorize } = require('../middleware/authMiddleware');
+const storageService = require('../services/storageService');
 
 const router = express.Router();
 
@@ -705,16 +706,45 @@ router.get('/profile/avatar', authenticate, async (req, res, next) => {
       });
     }
 
-    const filePath = path.resolve(UPLOAD_DIR, user.avatar);
-    if (!isPathInsideDirectory(UPLOAD_DIR, filePath) || !fs.existsSync(filePath)) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Avatar image not found on disk.'
+    const rawKey = user.avatar;
+    const resolvedUploadDir = path.resolve(UPLOAD_DIR);
+    const candidatePath = path.resolve(resolvedUploadDir, rawKey);
+    if (!isPathInsideDirectory(resolvedUploadDir, candidatePath)) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Access denied. Avatar path outside designated directory.'
       });
     }
 
+    const safeKey = path.basename(rawKey);
+    let fileBuffer;
+    try {
+      fileBuffer = await storageService.getFileBuffer(safeKey);
+    } catch (storageErr) {
+      if (storageErr.isNotFound || storageErr.statusCode === 404 || (storageErr.message && storageErr.message.includes('Object not found'))) {
+        return res.status(404).json({
+          error: 'Not Found',
+          message: 'Avatar image not found on disk.'
+        });
+      }
+      res.setHeader('Retry-After', '30');
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        message: 'Avatar storage service is temporarily unreachable. Please retry shortly.'
+      });
+    }
+
+    const ext = path.extname(safeKey).toLowerCase();
+    const mimeTypes = {
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg'
+    };
+    res.setHeader('Content-Type', mimeTypes[ext] || 'image/jpeg');
+    res.setHeader('Content-Disposition', `inline; filename="${safeKey}"`);
     res.setHeader('Cache-Control', 'private, max-age=86400');
-    return res.sendFile(filePath);
+    return res.status(200).send(fileBuffer);
   } catch (error) {
     next(error);
   }

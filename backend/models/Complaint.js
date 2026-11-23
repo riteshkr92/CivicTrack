@@ -98,6 +98,10 @@ const evidenceSchema = new mongoose.Schema(
       type: String,
       default: null
     },
+    sha256: {
+      type: String,
+      default: null
+    },
     originalFilename: {
       type: String,
       default: null
@@ -204,6 +208,10 @@ const completionEvidenceSchema = new mongoose.Schema(
       default: null
     },
     storageKey: {
+      type: String,
+      default: null
+    },
+    sha256: {
       type: String,
       default: null
     },
@@ -320,6 +328,7 @@ const disputePhotoSchema = new mongoose.Schema(
   {
     imageUrl: { type: String, default: null },
     storageKey: { type: String, default: null },
+    sha256: { type: String, default: null },
     originalName: { type: String, default: null },
     mimeType: { type: String, default: null },
     sizeBytes: { type: Number, default: null },
@@ -785,6 +794,7 @@ complaintSchema.methods.toSafeObject = function (viewer = null) {
     const raw = typeof this.evidence.toObject === 'function' ? this.evidence.toObject() : { ...this.evidence };
     delete raw.storageKey;
     delete raw.filePath;
+    delete raw.sha256;
     safeEvidence = raw;
   }
 
@@ -793,6 +803,7 @@ complaintSchema.methods.toSafeObject = function (viewer = null) {
     const raw = typeof this.completionEvidence.toObject === 'function' ? this.completionEvidence.toObject() : { ...this.completionEvidence };
     delete raw.storageKey;
     delete raw.filePath;
+    delete raw.sha256;
 
     // GPS Privacy Protection:
     // Exact officer completion GPS coordinates and raw EXIF coordinates are only accessible to
@@ -817,6 +828,7 @@ complaintSchema.methods.toSafeObject = function (viewer = null) {
     if (raw.photo) {
       delete raw.photo.storageKey;
       delete raw.photo.filePath;
+      delete raw.photo.sha256;
     }
     safeDispute = raw;
   }

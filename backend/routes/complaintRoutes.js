@@ -11,6 +11,7 @@ const { extractExifGps, calculateDistanceMeters, validateImageMagicBytes } = req
 const { sendNotification } = require('../utils/notificationService');
 const { analyzeComplaint, findPotentialDuplicates } = require('../utils/aiService');
 const { calculateSlaDeadlines, calculateReworkDeadline } = require('../config/slaPolicy');
+const storageService = require('../services/storageService');
 
 const router = express.Router();
 
@@ -1592,18 +1593,27 @@ router.get('/:id/evidence', async (req, res, next) => {
     }
 
     const safeKey = path.basename(rawKey);
-    const filePath = path.resolve(resolvedUploadDir, safeKey);
-    if (!isPathInsideDirectory(resolvedUploadDir, filePath) || !fs.existsSync(filePath)) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Evidence photograph file is missing from server storage.'
+    let fileBuffer;
+    try {
+      fileBuffer = await storageService.getFileBuffer(safeKey);
+    } catch (storageErr) {
+      if (storageErr.isNotFound || storageErr.statusCode === 404 || (storageErr.message && storageErr.message.includes('Object not found'))) {
+        return res.status(404).json({
+          error: 'Not Found',
+          message: 'Evidence photograph file is missing from server storage.'
+        });
+      }
+      res.setHeader('Retry-After', '30');
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        message: 'Evidence storage service is temporarily unreachable. Please retry shortly.'
       });
     }
 
     res.setHeader('Content-Type', complaint.evidence.mimetype || 'image/jpeg');
-    res.setHeader('Content-Disposition', `inline; filename="${complaint.evidence.storageKey}"`);
+    res.setHeader('Content-Disposition', `inline; filename="${safeKey}"`);
     res.setHeader('Cache-Control', 'private, max-age=3600');
-    return res.sendFile(filePath);
+    return res.status(200).send(fileBuffer);
   } catch (error) {
     next(error);
   }
@@ -1669,19 +1679,29 @@ router.get('/:id/completion-evidence', async (req, res, next) => {
     }
 
     const safeKey = path.basename(rawKey);
-    const filePath = path.resolve(resolvedUploadDir, safeKey);
-    if (!isPathInsideDirectory(resolvedUploadDir, filePath) || !fs.existsSync(filePath)) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Completion evidence photograph file is missing from server storage.'
+    let fileBuffer;
+    try {
+      fileBuffer = await storageService.getFileBuffer(safeKey);
+    } catch (storageErr) {
+      if (storageErr.isNotFound || storageErr.statusCode === 404 || (storageErr.message && storageErr.message.includes('Object not found'))) {
+        return res.status(404).json({
+          error: 'Not Found',
+          message: 'Completion evidence photograph file is missing from server storage.'
+        });
+      }
+      res.setHeader('Retry-After', '30');
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        message: 'Evidence storage service is temporarily unreachable. Please retry shortly.'
       });
     }
 
     res.setHeader('Content-Type', complaint.completionEvidence.mimetype || complaint.completionEvidence.mimeType || 'image/jpeg');
+    res.setHeader('Content-Disposition', `inline; filename="${safeKey}"`);
     res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
-    return res.sendFile(filePath);
+    return res.status(200).send(fileBuffer);
   } catch (error) {
     next(error);
   }
@@ -1747,19 +1767,29 @@ router.get('/:id/dispute-evidence', async (req, res, next) => {
     }
 
     const safeKey = path.basename(rawKey);
-    const filePath = path.resolve(resolvedUploadDir, safeKey);
-    if (!isPathInsideDirectory(resolvedUploadDir, filePath) || !fs.existsSync(filePath)) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Dispute evidence photograph file is missing from server storage.'
+    let fileBuffer;
+    try {
+      fileBuffer = await storageService.getFileBuffer(safeKey);
+    } catch (storageErr) {
+      if (storageErr.isNotFound || storageErr.statusCode === 404 || (storageErr.message && storageErr.message.includes('Object not found'))) {
+        return res.status(404).json({
+          error: 'Not Found',
+          message: 'Dispute evidence photograph file is missing from server storage.'
+        });
+      }
+      res.setHeader('Retry-After', '30');
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        message: 'Evidence storage service is temporarily unreachable. Please retry shortly.'
       });
     }
 
     res.setHeader('Content-Type', complaint.resolutionDispute.photo.mimeType || 'image/jpeg');
+    res.setHeader('Content-Disposition', `inline; filename="${safeKey}"`);
     res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
-    return res.sendFile(filePath);
+    return res.status(200).send(fileBuffer);
   } catch (error) {
     next(error);
   }
