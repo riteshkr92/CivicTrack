@@ -578,7 +578,7 @@ export async function fetchComplaintById(token, id) {
  * Fetch complaints assigned to the authenticated officer.
  * Calls GET /api/complaints/assigned.
  */
-export async function fetchAssignedComplaints(token, { page = 1, limit = 10, status = '', category = '', search = '' } = {}) {
+export async function fetchAssignedComplaints(token, { page = 1, limit = 10, status = '', category = '', search = '', slaBreached = '', escalationLevel = '' } = {}) {
   if (!token) {
     return { ok: false, status: 401, errorMessage: 'Authentication required to view assigned complaints.' };
   }
@@ -590,6 +590,8 @@ export async function fetchAssignedComplaints(token, { page = 1, limit = 10, sta
   if (status) queryParams.set('status', status);
   if (category) queryParams.set('category', category);
   if (search) queryParams.set('search', search);
+  if (slaBreached) queryParams.set('slaBreached', String(slaBreached));
+  if (escalationLevel !== '' && escalationLevel !== undefined) queryParams.set('escalationLevel', String(escalationLevel));
 
   const endpoint = `${API_BASE_URL}/api/complaints/assigned?${queryParams.toString()}`;
 
@@ -866,7 +868,7 @@ export async function assignComplaint(token, id, { officerId, department = '', c
  * Admin fetches complaints list for oversight & assignment.
  * Calls GET /api/complaints/admin/all.
  */
-export async function fetchAdminComplaints(token, { page = 1, limit = 10, unassigned = false, status = '', category = '' } = {}) {
+export async function fetchAdminComplaints(token, { page = 1, limit = 10, unassigned = false, status = '', category = '', slaBreached = '', escalationLevel = '', criticalAttention = '' } = {}) {
   if (!token) {
     return { ok: false, status: 401, errorMessage: 'Authentication required.' };
   }
@@ -878,6 +880,9 @@ export async function fetchAdminComplaints(token, { page = 1, limit = 10, unassi
   if (unassigned) queryParams.set('unassigned', 'true');
   if (status) queryParams.set('status', status);
   if (category) queryParams.set('category', category);
+  if (slaBreached) queryParams.set('slaBreached', String(slaBreached));
+  if (escalationLevel !== '' && escalationLevel !== undefined) queryParams.set('escalationLevel', String(escalationLevel));
+  if (criticalAttention) queryParams.set('criticalAttention', String(criticalAttention));
 
   const endpoint = `${API_BASE_URL}/api/complaints/admin/all?${queryParams.toString()}`;
 
@@ -1295,7 +1300,7 @@ export async function markAllNotificationsRead(token) {
 }
 
 /**
- * Fetch authenticated evidence image as an object URL blob.
+ * Fetch authenticated evidence image as a Blob.
  * Calls GET /api/complaints/:id/evidence.
  */
 export async function fetchEvidenceBlob(token, complaintId) {
@@ -1313,7 +1318,138 @@ export async function fetchEvidenceBlob(token, complaintId) {
 
     if (response.status === 200) {
       const blob = await response.blob();
-      return URL.createObjectURL(blob);
+      return blob;
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Fetch authenticated completion photograph evidence as a Blob.
+ * Calls GET /api/complaints/:id/completion-evidence.
+ */
+export async function fetchCompletionEvidenceBlob(token, complaintId) {
+  if (!token || !complaintId) return null;
+
+  const endpoint = `${API_BASE_URL}/api/complaints/${complaintId}/completion-evidence`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    if (response.status === 200) {
+      const blob = await response.blob();
+      return blob;
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Submit geo-verified work completion evidence by assigned officer.
+ * Calls POST /api/complaints/:id/complete-work.
+ *
+ * @param {string} token - In-memory officer JWT
+ * @param {string} complaintId - Complaint ID or tracking ID
+ * @param {Object} data - { photoFile, resolutionNotes, latitude, longitude, accuracy, capturedAt }
+ */
+export async function submitWorkCompletion(token, complaintId, { photoFile, resolutionNotes, latitude, longitude, accuracy, capturedAt }) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Officer authentication required.' };
+  }
+
+  const endpoint = `${API_BASE_URL}/api/complaints/${complaintId}/complete-work`;
+  const formData = new FormData();
+
+  if (photoFile) {
+    formData.append('completionPhoto', photoFile);
+  }
+  if (resolutionNotes) {
+    formData.append('resolutionNotes', resolutionNotes);
+  }
+  if (latitude !== undefined && latitude !== null) {
+    formData.append('latitude', latitude);
+  }
+  if (longitude !== undefined && longitude !== null) {
+    formData.append('longitude', longitude);
+  }
+  if (accuracy !== undefined && accuracy !== null) {
+    formData.append('accuracy', accuracy);
+  }
+  if (capturedAt) {
+    formData.append('capturedAt', capturedAt);
+  }
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      },
+      body: formData
+    });
+
+    let data = null;
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      try {
+        data = await response.json();
+      } catch (e) {
+        data = null;
+      }
+    }
+
+    if (response.ok && data) {
+      return {
+        ok: true,
+        complaint: data.complaint,
+        completionEvidence: data.completionEvidence,
+        verification: data.verification,
+        message: data.message
+      };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to submit work completion (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to submit work completion.'
+    };
+  }
+}
+
+/**
+ * Fetch authenticated dispute photograph evidence as a Blob.
+ * Calls GET /api/complaints/:id/dispute-evidence.
+ */
+export async function fetchDisputeEvidenceBlob(token, complaintId) {
+  if (!token || !complaintId) return null;
+
+  const endpoint = `${API_BASE_URL}/api/complaints/${complaintId}/dispute-evidence`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    if (response.status === 200) {
+      const blob = await response.blob();
+      return blob;
     }
     return null;
   } catch (e) {
@@ -1436,6 +1572,673 @@ export async function getAiAssistance(token, { title, description, category, coo
       ok: false,
       errorMessage: error.message || 'Network error: Failed to reach AI assistance service.'
     };
+  }
+}
+
+/**
+ * Citizen confirms satisfactory resolution of a provisionally resolved complaint.
+ * Calls PATCH /api/complaints/:id/confirm-resolution.
+ */
+export async function confirmComplaintResolution(token, complaintId) {
+  if (!token || !complaintId) {
+    return { ok: false, errorMessage: 'Authentication and complaint ID are required.' };
+  }
+
+  const endpoint = `${API_BASE_URL}/api/complaints/${complaintId}/confirm-resolution`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    const data = await response.json();
+
+    if (response.ok) {
+      return { ok: true, complaint: data.complaint, message: data.message };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to confirm resolution (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Citizen disputes a provisionally resolved complaint with reason and optional photo.
+ * Calls POST /api/complaints/:id/dispute.
+ */
+export async function disputeComplaintResolution(token, complaintId, { reason, photoFile = null }) {
+  if (!token || !complaintId) {
+    return { ok: false, errorMessage: 'Authentication and complaint ID are required.' };
+  }
+
+  const endpoint = `${API_BASE_URL}/api/complaints/${complaintId}/dispute`;
+
+  try {
+    const formData = new FormData();
+    formData.append('reason', reason);
+    if (photoFile) {
+      formData.append('disputePhoto', photoFile);
+    }
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: formData
+    });
+
+    const data = await response.json();
+
+    if (response.ok) {
+      return { ok: true, complaint: data.complaint, message: data.message };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to submit dispute (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Administrator reviews a disputed complaint (decision: 'accept' or 'reopen').
+ * Calls PATCH /api/complaints/:id/admin-review.
+ */
+export async function adminReviewDispute(token, complaintId, { action, reviewNotes }) {
+  if (!token || !complaintId) {
+    return { ok: false, errorMessage: 'Authentication and complaint ID are required.' };
+  }
+
+  const endpoint = `${API_BASE_URL}/api/complaints/${complaintId}/admin-review`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ action, reviewNotes })
+    });
+
+    const data = await response.json();
+
+    if (response.ok) {
+      return { ok: true, complaint: data.complaint, message: data.message };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to submit admin dispute review (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Fetch active Municipal SLA Policy matrix.
+ * Calls GET /api/sla/policy.
+ *
+ * @param {string} token - In-memory JWT
+ */
+export async function fetchSlaPolicy(token) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Authentication required.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/sla/policy`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
+      }
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, policy: data.policy };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to fetch SLA policy (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Update Municipal SLA Policy targets (Admin only).
+ * Calls PATCH /api/sla/policy.
+ *
+ * @param {string} token - Admin JWT
+ * @param {Object} policyData - { priorityTargets, categoryResolutionOverrides, escalationRules, description }
+ */
+export async function updateSlaPolicy(token, policyData) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Admin authentication required.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/sla/policy`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(policyData)
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, policy: data.policy, message: data.message };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to update SLA policy (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Fetch comprehensive SLA compliance, escalation, and breach metrics (Admin only).
+ * Calls GET /api/sla/overview.
+ *
+ * @param {string} token - Admin JWT
+ */
+export async function fetchSlaOverview(token) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Admin authentication required.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/sla/overview`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
+      }
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, slaOverview: data.slaOverview };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to fetch SLA overview (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Trigger an immediate on-demand SLA evaluation and escalation cycle (Admin only).
+ * Calls POST /api/sla/evaluate.
+ *
+ * @param {string} token - Admin JWT
+ */
+export async function triggerSlaEvaluation(token) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Admin authentication required.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/sla/evaluate`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
+      }
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, results: data.results, message: data.message };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to trigger SLA evaluation (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Fetch critical attention summary & active complaints (Admin only).
+ * Calls GET /api/sla/critical-attention.
+ *
+ * @param {string} token - Admin JWT
+ */
+export async function fetchCriticalAttention(token) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Admin authentication required.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/sla/critical-attention`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
+      }
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, criticalAttention: data.criticalAttention };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to fetch critical attention metrics (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Record a structured administrative escalation action on a complaint (Admin only).
+ * Calls POST /api/sla/complaints/:id/actions.
+ *
+ * @param {string} token - Admin JWT
+ * @param {string} complaintId - Complaint ID or tracking ID
+ * @param {Object} actionData - { actionType, adminNotes, newOfficerId, department }
+ */
+export async function recordSlaAction(token, complaintId, { actionType, adminNotes, newOfficerId, department }) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Admin authentication required.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/sla/complaints/${complaintId}/actions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({ actionType, adminNotes, newOfficerId, department })
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, complaint: data.complaint, action: data.action, message: data.message };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to record escalation action (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Retrieve internal escalation action history for a complaint (Admin only).
+ * Calls GET /api/sla/complaints/:id/actions.
+ *
+ * @param {string} token - Admin JWT
+ * @param {string} complaintId - Complaint ID
+ */
+export async function fetchSlaActions(token, complaintId) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Admin authentication required.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/sla/complaints/${complaintId}/actions`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
+      }
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, actions: data.actions };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to fetch escalation actions (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Fetch authenticated user profile.
+ * Calls GET /api/auth/profile.
+ *
+ * @param {string} token - In-memory JWT
+ */
+export async function fetchUserProfile(token) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Authentication required.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/auth/profile`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
+      }
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, user: data.user };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to fetch profile (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Update authenticated user profile fields.
+ * Calls PATCH /api/auth/profile.
+ *
+ * @param {string} token - In-memory JWT
+ * @param {Object} profileData - { name, phone, address, email, currentPassword }
+ */
+export async function updateUserProfile(token, profileData) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Authentication required.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/auth/profile`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(profileData)
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, user: data.user, message: data.message };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to update profile (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Change authenticated user password.
+ * Calls PATCH /api/auth/change-password.
+ *
+ * @param {string} token - In-memory JWT
+ * @param {Object} passwordData - { currentPassword, newPassword, confirmPassword }
+ */
+export async function changePassword(token, { currentPassword, newPassword, confirmPassword }) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Authentication required.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/auth/change-password`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({ currentPassword, newPassword, confirmPassword })
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, message: data.message };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to change password (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Fetch authenticated user notification preferences.
+ * Calls GET /api/auth/notifications/preferences.
+ *
+ * @param {string} token - In-memory JWT
+ */
+export async function fetchNotificationPreferences(token) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Authentication required.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/auth/notifications/preferences`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
+      }
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, preferences: data.preferences };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to fetch notification preferences (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Update authenticated user notification preferences.
+ * Calls PATCH /api/auth/notifications/preferences.
+ *
+ * @param {string} token - In-memory JWT
+ * @param {Object} preferences - { complaintStatusUpdates, complaintAssignments, slaWarningsAndBreaches, resolutionDisputeUpdates }
+ */
+export async function updateNotificationPreferences(token, preferences) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Authentication required.' };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/auth/notifications/preferences`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(preferences)
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, preferences: data.preferences, message: data.message };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to update notification preferences (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Upload profile avatar image.
+ * Calls POST /api/auth/profile/avatar.
+ *
+ * @param {string} token - In-memory JWT
+ * @param {File} file - Avatar image file
+ */
+export async function uploadAvatar(token, file) {
+  if (!token) {
+    return { ok: false, status: 401, errorMessage: 'Authentication required.' };
+  }
+
+  const formData = new FormData();
+  formData.append('avatar', file);
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/auth/profile/avatar`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      },
+      body: formData
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      return { ok: true, user: data.user, avatar: data.avatar, message: data.message };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorMessage: data?.message || `Failed to upload avatar (HTTP ${response.status})`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      errorMessage: error.message || 'Network error: Failed to reach server.'
+    };
+  }
+}
+
+/**
+ * Fetch avatar image blob for authenticated user.
+ * Calls GET /api/auth/profile/avatar.
+ *
+ * @param {string} token - In-memory JWT
+ */
+export async function fetchAvatarBlob(token) {
+  if (!token) return null;
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/auth/profile/avatar`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    if (response.ok) {
+      return await response.blob();
+    }
+    return null;
+  } catch (error) {
+    return null;
   }
 }
 

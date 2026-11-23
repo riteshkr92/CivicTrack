@@ -1,56 +1,73 @@
-/* CivicTrack Global Design Tokens and Base Styles */
+/* CivicTrack Global Design Tokens and Municipal Base Styles */
 :root {
   --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
   
-  /* Color Palette */
-  --color-bg-app: #f8fafc;
-  --color-bg-card: #ffffff;
-  --color-bg-card-hover: #fcfdfe;
-  --color-border: #e2e8f0;
-  --color-border-subtle: #edf2f7;
+  /* Municipal Institutional Color Palette */
+  --color-gov-blue: #104A9E;
+  --color-gov-navy: #12345B;
+  --color-gov-navy-dark: #0D2644;
+  --color-gov-bg: #F3F6FA;
+  --color-gov-card: #FFFFFF;
+  --color-gov-border: #DCE4ED;
+  --color-gov-border-subtle: #EDF2F7;
+  --color-gov-text: #253449;
+  --color-gov-muted: #64748B;
+  --color-gov-accent: #E99B36;
+
+  /* Global Color Aliases */
+  --color-bg-app: var(--color-gov-bg);
+  --color-bg-card: var(--color-gov-card);
+  --color-bg-card-hover: #F8FAFD;
+  --color-border: var(--color-gov-border);
+  --color-border-subtle: var(--color-gov-border-subtle);
   
   /* Text Colors */
-  --color-text-main: #0f172a;
-  --color-text-muted: #64748b;
-  --color-text-light: #94a3b8;
+  --color-text-main: var(--color-gov-text);
+  --color-text-muted: var(--color-gov-muted);
+  --color-text-light: #94A3B8;
   
   /* Accent Colors */
-  --color-primary: #2563eb;
-  --color-primary-hover: #1d4ed8;
-  --color-primary-light: #eff6ff;
-  --color-primary-border: #bfdbfe;
+  --color-primary: var(--color-gov-blue);
+  --color-primary-hover: #0D3E85;
+  --color-primary-light: #EFF6FF;
+  --color-primary-border: #BFDBFE;
   
   /* Status Colors */
-  --color-success: #10b981;
-  --color-success-bg: #ecfdf5;
-  --color-success-border: #a7f3d0;
-  --color-success-text: #065f46;
+  --color-success: #16A34A;
+  --color-success-bg: #F0FDF4;
+  --color-success-border: #BBF7D0;
+  --color-success-text: #166534;
   
-  --color-warning: #f59e0b;
-  --color-warning-bg: #fffbeb;
-  --color-warning-border: #fde68a;
-  --color-warning-text: #92400e;
+  --color-warning: #D97706;
+  --color-warning-bg: #FFFBEB;
+  --color-warning-border: #FDE68A;
+  --color-warning-text: #B45309;
   
-  --color-danger: #ef4444;
-  --color-danger-bg: #fef2f2;
-  --color-danger-border: #fecaca;
-  --color-danger-text: #991b1b;
+  --color-danger: #DC2626;
+  --color-danger-bg: #FEF2F2;
+  --color-danger-border: #FECACA;
+  --color-danger-text: #991B1B;
   
-  --color-info: #06b6d4;
-  --color-info-bg: #ecfeff;
-  --color-info-border: #a5f3fc;
-  --color-info-text: #155e75;
+  --color-info: #0284C7;
+  --color-info-bg: #F0F9FF;
+  --color-info-border: #BAE6FD;
+  --color-info-text: #0369A1;
 
-  /* Elevation */
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.07), 0 2px 4px -2px rgb(0 0 0 / 0.07);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.08);
+  --color-purple: #7C3AED;
+  --color-purple-bg: #F5F3FF;
+  --color-purple-border: #DDD6FE;
+  --color-purple-text: #6D28D9;
+
+  /* Elevation (Restrained, Institutional) */
+  --shadow-sm: 0 1px 2px 0 rgba(18, 52, 91, 0.05);
+  --shadow-md: 0 3px 6px -1px rgba(18, 52, 91, 0.08), 0 2px 4px -2px rgba(18, 52, 91, 0.05);
+  --shadow-lg: 0 8px 16px -3px rgba(18, 52, 91, 0.1), 0 4px 6px -4px rgba(18, 52, 91, 0.05);
 
   /* Radii */
   --radius-sm: 6px;
   --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 20px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
   --radius-full: 9999px;
 
   /* Transitions */

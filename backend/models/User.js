@@ -40,6 +40,53 @@ const userSchema = new mongoose.Schema(
       trim: true,
       maxlength: [100, 'Department cannot exceed 100 characters'],
       default: null
+    },
+    phone: {
+      type: String,
+      trim: true,
+      maxlength: [20, 'Phone number cannot exceed 20 characters'],
+      default: ''
+    },
+    address: {
+      type: String,
+      trim: true,
+      maxlength: [250, 'Address cannot exceed 250 characters'],
+      default: ''
+    },
+    avatar: {
+      type: String,
+      trim: true,
+      default: null
+    },
+    employeeId: {
+      type: String,
+      trim: true,
+      maxlength: [50, 'Employee ID cannot exceed 50 characters'],
+      default: null
+    },
+    designation: {
+      type: String,
+      trim: true,
+      maxlength: [100, 'Designation cannot exceed 100 characters'],
+      default: null
+    },
+    notificationPreferences: {
+      complaintStatusUpdates: {
+        type: Boolean,
+        default: true
+      },
+      complaintAssignments: {
+        type: Boolean,
+        default: true
+      },
+      slaWarningsAndBreaches: {
+        type: Boolean,
+        default: true
+      },
+      resolutionDisputeUpdates: {
+        type: Boolean,
+        default: true
+      }
     }
   },
   {
@@ -168,6 +215,17 @@ userSchema.methods.toSafeObject = function () {
     email: this.email,
     role: this.role,
     department: this.department,
+    phone: this.phone || '',
+    address: this.address || '',
+    avatar: this.avatar || null,
+    employeeId: this.employeeId || null,
+    designation: this.designation || null,
+    notificationPreferences: this.notificationPreferences || {
+      complaintStatusUpdates: true,
+      complaintAssignments: true,
+      slaWarningsAndBreaches: true,
+      resolutionDisputeUpdates: true
+    },
     createdAt: this.createdAt,
     updatedAt: this.updatedAt
   };

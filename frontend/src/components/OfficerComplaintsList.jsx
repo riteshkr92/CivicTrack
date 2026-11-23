@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { fetchAssignedComplaints, downloadComplaintsCsv } from '../services/api';
 import StatusUpdateModal from './StatusUpdateModal';
+import WorkCompletionModal from './WorkCompletionModal';
 
 const CATEGORIES = [
   'All Categories',
@@ -18,6 +19,8 @@ const STATUSES = [
   'Submitted',
   'Under Review',
   'In Progress',
+  'Provisionally Resolved',
+  'Disputed',
   'Resolved',
   'Rejected'
 ];
@@ -38,8 +41,9 @@ export default function OfficerComplaintsList({ onSelectComplaint, onStatusUpdat
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSearch, setActiveSearch] = useState('');
 
-  // Status Update Modal
+  // Status Update & Work Completion Modals
   const [statusModalComplaint, setStatusModalComplaint] = useState(null);
+  const [completionModalComplaint, setCompletionModalComplaint] = useState(null);
 
   const handleExportCsv = async () => {
     if (!token) return;
@@ -136,6 +140,10 @@ export default function OfficerComplaintsList({ onSelectComplaint, onStatusUpdat
         return 'status-review';
       case 'In Progress':
         return 'status-progress';
+      case 'Provisionally Resolved':
+        return 'status-provisional';
+      case 'Disputed':
+        return 'status-disputed';
       case 'Resolved':
         return 'status-resolved';
       case 'Rejected':
@@ -158,6 +166,36 @@ export default function OfficerComplaintsList({ onSelectComplaint, onStatusUpdat
       default:
         return 'priority-medium';
     }
+  };
+
+  const renderSlaBadge = (c) => {
+    if (c.status === 'Resolved') {
+      return (
+        <span className="sla-badge sla-badge-completed">
+          {c.sla?.isResolvedWithinSla ? '✓ Within SLA' : 'Resolved Overdue'}
+        </span>
+      );
+    }
+    if (c.status === 'Rejected') {
+      return <span className="sla-badge sla-badge-completed">Closed</span>;
+    }
+    if (c.reworkCount > 0 && c.sla?.reworkDeadline) {
+      if (c.sla?.isBreached || (c.sla?.breachedStages || []).includes('rework')) {
+        return <span className="sla-badge sla-badge-breached">⚠️ Rework Overdue</span>;
+      }
+      return <span className="sla-badge sla-badge-rework">🔄 Rework Active</span>;
+    }
+    const level = c.sla?.escalationLevel || 0;
+    if (level === 3) {
+      return <span className="sla-badge sla-badge-escalated">⚠️ L3 Critical</span>;
+    }
+    if (level === 2 || c.sla?.isBreached) {
+      return <span className="sla-badge sla-badge-breached">⚠️ Overdue</span>;
+    }
+    if (level === 1) {
+      return <span className="sla-badge sla-badge-approaching">⏳ Deadline Near</span>;
+    }
+    return <span className="sla-badge sla-badge-normal">● On Track</span>;
   };
 
   const handleComplaintUpdated = (updated) => {
@@ -342,6 +380,7 @@ export default function OfficerComplaintsList({ onSelectComplaint, onStatusUpdat
                 <th scope="col">Tracking ID</th>
                 <th scope="col">Title & Location</th>
                 <th scope="col">Category & Priority</th>
+                <th scope="col">SLA Status</th>
                 <th scope="col">Submitted</th>
                 <th scope="col">Status</th>
                 <th scope="col" className="text-right">Actions</th>
@@ -369,6 +408,9 @@ export default function OfficerComplaintsList({ onSelectComplaint, onStatusUpdat
                         </span>
                       </div>
                     </td>
+                    <td className="sla-cell">
+                      {renderSlaBadge(c)}
+                    </td>
                     <td className="date-cell">
                       {formatDate(c.createdAt)}
                     </td>
@@ -387,15 +429,37 @@ export default function OfficerComplaintsList({ onSelectComplaint, onStatusUpdat
                         >
                           Details
                         </button>
-                        <button
-                          type="button"
-                          className={`action-btn-status ${isTerminal ? 'disabled' : 'active'}`}
-                          onClick={() => setStatusModalComplaint(c)}
-                          disabled={isTerminal}
-                          title={isTerminal ? `Record is ${c.status}` : 'Update status or resolve'}
-                        >
-                          {isTerminal ? 'Closed' : 'Update Status'}
-                        </button>
+                        {c.status === 'In Progress' ? (
+                          <button
+                            type="button"
+                            className="card-btn"
+                            style={{ backgroundColor: '#16a34a', color: '#ffffff', border: 'none', padding: '4px 10px', fontSize: '0.78rem', fontWeight: 600 }}
+                            onClick={() => setCompletionModalComplaint(c)}
+                            title="Submit geo-verified work completion photograph"
+                          >
+                            Complete Work
+                          </button>
+                        ) : c.status === 'Under Review' ? (
+                          <button
+                            type="button"
+                            className="card-btn amber-solid"
+                            style={{ padding: '4px 10px', fontSize: '0.78rem', fontWeight: 600 }}
+                            onClick={() => setStatusModalComplaint(c)}
+                            title="Start field work"
+                          >
+                            Start Work
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className={`action-btn-status ${isTerminal || c.status === 'Provisionally Resolved' ? 'disabled' : 'active'}`}
+                            onClick={() => setStatusModalComplaint(c)}
+                            disabled={isTerminal || c.status === 'Provisionally Resolved'}
+                            title={isTerminal ? `Record is ${c.status}` : c.status === 'Provisionally Resolved' ? 'Awaiting citizen review' : 'Update status'}
+                          >
+                            {isTerminal ? 'Closed' : c.status === 'Provisionally Resolved' ? 'Pending Citizen' : 'Update Status'}
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -440,6 +504,19 @@ export default function OfficerComplaintsList({ onSelectComplaint, onStatusUpdat
           token={token}
           onClose={() => setStatusModalComplaint(null)}
           onUpdated={(updated) => {
+            handleComplaintUpdated(updated);
+            loadAssignedComplaints(pagination.page);
+          }}
+        />
+      )}
+
+      {/* Geo-Verified Work Completion Modal */}
+      {completionModalComplaint && (
+        <WorkCompletionModal
+          complaint={completionModalComplaint}
+          token={token}
+          onClose={() => setCompletionModalComplaint(null)}
+          onCompleted={(updated) => {
             handleComplaintUpdated(updated);
             loadAssignedComplaints(pagination.page);
           }}

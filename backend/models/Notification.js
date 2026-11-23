@@ -5,7 +5,17 @@ const NOTIFICATION_TYPES = [
   'complaint_reassigned',
   'status_changed',
   'complaint_resolved',
-  'notes_updated'
+  'notes_updated',
+  'work_completed',
+  'resolution_confirmed',
+  'resolution_disputed',
+  'resolution_admin_closed',
+  'resolution_reopened',
+  'sla_warning',
+  'sla_breached',
+  'sla_escalated',
+  'sla_rework_warning',
+  'sla_rework_breached'
 ];
 
 const notificationSchema = new mongoose.Schema(

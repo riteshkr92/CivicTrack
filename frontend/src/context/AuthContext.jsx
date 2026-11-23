@@ -137,6 +137,13 @@ export function AuthProvider({ children }) {
   }, []);
 
   /**
+   * Update the in-memory user document when profile changes
+   */
+  const updateUser = useCallback((updatedUser) => {
+    setUser((prev) => (prev ? { ...prev, ...updatedUser } : updatedUser));
+  }, []);
+
+  /**
    * Clear invalid authentication when a protected API returns 401
    */
   const handleUnauthorized = useCallback(() => {
@@ -155,6 +162,7 @@ export function AuthProvider({ children }) {
     login,
     register,
     logout,
+    updateUser,
     handleUnauthorized
   };
 

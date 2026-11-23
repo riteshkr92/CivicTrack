@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import Sidebar from '../components/Sidebar';
 import Header from '../components/Header';
@@ -13,7 +13,9 @@ import OfficerComplaintsList from '../components/OfficerComplaintsList';
 import AdminAssignmentView from '../components/AdminAssignmentView';
 import OfficerWorkloadView from '../components/OfficerWorkloadView';
 import ReportsView from '../components/ReportsView';
+import SettingsView from '../components/SettingsView';
 import ComplaintDetailModal from '../components/ComplaintDetailModal';
+import SlaGaugeCard from '../components/SlaGaugeCard';
 import {
   fetchComplaintSummary,
   fetchMyComplaints,
@@ -50,6 +52,8 @@ export default function DashboardView() {
     totalAssigned: 0,
     underReview: 0,
     inProgress: 0,
+    provisionallyResolved: 0,
+    disputed: 0,
     resolved: 0,
     rejected: 0
   });
@@ -63,6 +67,8 @@ export default function DashboardView() {
       Submitted: 0,
       'Under Review': 0,
       'In Progress': 0,
+      'Provisionally Resolved': 0,
+      Disputed: 0,
       Resolved: 0,
       Rejected: 0
     },
@@ -85,6 +91,25 @@ export default function DashboardView() {
 
   // Selected Complaint for Modal Inspection
   const [selectedComplaint, setSelectedComplaint] = useState(null);
+
+  // SLA Overdue Counts (strictly non-terminal active complaints)
+  const officerOverdueCount = useMemo(() => {
+    return (officerComplaints || []).filter(
+      (c) =>
+        c.status !== 'Resolved' &&
+        c.status !== 'Rejected' &&
+        (c.sla?.isBreached || (c.sla?.escalationLevel && c.sla.escalationLevel > 0))
+    ).length;
+  }, [officerComplaints]);
+
+  const adminOverdueCount = useMemo(() => {
+    return (adminComplaints || []).filter(
+      (c) =>
+        c.status !== 'Resolved' &&
+        c.status !== 'Rejected' &&
+        (c.sla?.isBreached || (c.sla?.escalationLevel && c.sla.escalationLevel > 0))
+    ).length;
+  }, [adminComplaints]);
 
   const toggleSidebar = () => setSidebarOpen((prev) => !prev);
   const closeSidebar = () => setSidebarOpen(false);
@@ -221,7 +246,7 @@ export default function DashboardView() {
 
   const handleSelectNav = (navId) => {
     setActiveNav(navId);
-    const validNavs = ['overview', 'reports'];
+    const validNavs = ['overview', 'reports', 'settings'];
     if (role === 'citizen') {
       validNavs.push('my-complaints', 'report-issue', 'city-map');
       if (navId === 'city-map' && citizenComplaints.length === 0) {
@@ -243,6 +268,17 @@ export default function DashboardView() {
 
     if (!validNavs.includes(navId)) {
       showToast(`Selected "${navId}".`);
+    }
+  };
+
+  const handleComplaintUpdated = (updated) => {
+    setSelectedComplaint(updated);
+    if (role === 'citizen') {
+      refreshCitizenData();
+    } else if (role === 'officer') {
+      refreshOfficerData();
+    } else if (role === 'admin') {
+      refreshAdminData();
     }
   };
 
@@ -344,6 +380,45 @@ export default function DashboardView() {
                     </button>
                   </div>
                 </section>
+
+                {/* Pending Resolution Review Banner */}
+                {citizenSummary.provisionallyResolved > 0 && (
+                  <div
+                    style={{
+                      background: 'rgba(16, 185, 129, 0.08)',
+                      border: '1px solid rgba(16, 185, 129, 0.3)',
+                      borderRadius: '8px',
+                      padding: '14px 18px',
+                      marginBottom: '16px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '16px'
+                    }}
+                    role="alert"
+                    aria-live="polite"
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <span style={{ fontSize: '1.4rem' }}>📋</span>
+                      <div>
+                        <strong style={{ color: '#065f46', fontSize: '0.95rem' }}>
+                          Action Required: {citizenSummary.provisionallyResolved} Completed Work Order{citizenSummary.provisionallyResolved > 1 ? 's' : ''} Awaiting Your Review
+                        </strong>
+                        <p style={{ margin: '2px 0 0 0', color: '#047857', fontSize: '0.85rem' }}>
+                          An officer has submitted photographic completion evidence. Please inspect the work and confirm resolution or submit a dispute.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      style={{ whiteSpace: 'nowrap', padding: '7px 16px', fontSize: '0.85rem', cursor: 'pointer' }}
+                      onClick={() => setActiveNav('my-complaints')}
+                    >
+                      Review Work
+                    </button>
+                  </div>
+                )}
 
                 {/* 4 Authentic Citizen Summary Metric Cards */}
                 <section className="metrics-row four-cols citizen-metrics-grid" aria-label="My Citizen Metrics">
@@ -448,6 +523,32 @@ export default function DashboardView() {
                       Officer Assignment Engine: Active Database State: {officerSummary.totalAssigned} assigned task{officerSummary.totalAssigned === 1 ? '' : 's'}
                     </span>
                   </div>
+
+                  {officerSummary.disputed > 0 && (
+                    <div
+                      style={{
+                        background: 'rgba(239, 68, 68, 0.08)',
+                        border: '1px solid rgba(239, 68, 68, 0.3)',
+                        borderRadius: '8px',
+                        padding: '12px 16px',
+                        marginTop: '12px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '12px'
+                      }}
+                      role="alert"
+                    >
+                      <span style={{ fontSize: '1.25rem' }}>⚠️</span>
+                      <div>
+                        <strong style={{ color: '#991b1b', fontSize: '0.95rem' }}>
+                          Notice: {officerSummary.disputed} Complaint{officerSummary.disputed > 1 ? 's' : ''} Disputed by Citizen
+                        </strong>
+                        <p style={{ margin: 0, color: '#b91c1c', fontSize: '0.85rem' }}>
+                          A citizen was dissatisfied with work evidence. The complaint is currently under administrative dispute review.
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </section>
 
                 {/* 4 Officer Metric Cards */}
@@ -483,9 +584,9 @@ export default function DashboardView() {
                   />
 
                   <StatCard
-                    label="PENDING PROOF"
+                    label="RESOLVED / CLOSED"
                     value={String(officerSummary.resolved || 0)}
-                    subtext="Closed with resolution notes"
+                    subtext={officerSummary.provisionallyResolved > 0 ? `${officerSummary.provisionallyResolved} awaiting citizen confirmation` : "Closed with verified evidence"}
                     colorScheme="green"
                     icon={
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -497,10 +598,10 @@ export default function DashboardView() {
 
                   <StatCard
                     label="OVERDUE TASKS"
-                    value="—"
-                    subtext="Awaiting SLA tracking"
-                    colorScheme="danger"
-                    isUnavailable={true}
+                    value={String(officerOverdueCount)}
+                    subtext={officerOverdueCount > 0 ? `${officerOverdueCount} active breach${officerOverdueCount === 1 ? '' : 'es'}` : "All tasks within SLA"}
+                    colorScheme={officerOverdueCount > 0 ? "danger" : "green"}
+                    isUnavailable={false}
                     icon={
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <circle cx="12" cy="12" r="10" />
@@ -509,6 +610,27 @@ export default function DashboardView() {
                     }
                   />
                 </section>
+
+                {/* Officer SLA Performance Card */}
+                {officerSummary.totalAssigned > 0 && (
+                  <div className="officer-performance-row">
+                    <SlaGaugeCard
+                      totalComplaints={
+                        Math.max(
+                          0,
+                          (officerSummary.totalAssigned || 0) -
+                          (officerSummary.resolved || 0) -
+                          (officerSummary.rejected || 0)
+                        )
+                      }
+                      overdueCount={officerOverdueCount}
+                      inProgressCount={officerSummary.inProgress || 0}
+                      resolvedCount={officerSummary.resolved || 0}
+                      title="Department Field SLA Performance"
+                      subtitle="Real-time metric computed across active assigned tasks"
+                    />
+                  </div>
+                )}
 
                 {/* Officer Lower Grid: Department Queue Table + Ward Map */}
                 <div className="operations-grid">
@@ -527,7 +649,22 @@ export default function DashboardView() {
               /* Administrator Dashboard View (Operations Center) */
               <>
                 {/* Needs Attention Panel */}
-                <NeedsAttentionPanel alertsCount={adminSummary.unassigned} />
+                <NeedsAttentionPanel
+                  alertsCount={(adminSummary.unassigned || 0) + adminOverdueCount}
+                  overdueCount={adminOverdueCount}
+                  unassignedCount={adminSummary.unassigned || 0}
+                  nearingBreachCount={(adminComplaints || []).filter(
+                    (c) =>
+                      c.sla?.remainingHours !== undefined &&
+                      c.sla.remainingHours !== null &&
+                      c.sla.remainingHours > 0 &&
+                      c.sla.remainingHours <= 6 &&
+                      !c.sla.isBreached
+                  ).length}
+                  onAssignClick={() => handleSelectNav('work-orders')}
+                  onOverdueClick={() => handleSelectNav('work-orders')}
+                  onReviewClick={() => handleSelectNav('work-orders')}
+                />
 
                 {/* 5 City-Wide Metric Cards */}
                 <section className="metrics-row" aria-label="City-Wide Operations Metrics">
@@ -551,11 +688,11 @@ export default function DashboardView() {
                   />
 
                   <StatCard
-                    label="OVERDUE"
-                    value="—"
-                    subtext="Awaiting municipal SLA policy"
-                    colorScheme="danger"
-                    isUnavailable={true}
+                    label="OVERDUE / BREACHED"
+                    value={String(adminOverdueCount)}
+                    subtext={adminOverdueCount > 0 ? `${adminOverdueCount} breach${adminOverdueCount === 1 ? '' : 'es'} requiring attention` : "All complaints within SLA"}
+                    colorScheme={adminOverdueCount > 0 ? "danger" : "green"}
+                    isUnavailable={false}
                     icon={
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <circle cx="12" cy="12" r="10" />
@@ -615,65 +752,79 @@ export default function DashboardView() {
                   />
                 </section>
 
-                {/* Complaint Lifecycle Pipeline Breakdown */}
-                <section className="admin-status-pipeline-card" aria-label="Complaint Lifecycle Status Distribution">
-                  <div className="pipeline-header">
-                    <div className="pipeline-title-group">
-                      <h3 className="pipeline-title">City-Wide Complaint Lifecycle Pipeline</h3>
-                      <span className="pipeline-subtitle">Live real-time aggregation across all municipal categories</span>
-                    </div>
-                    <div className="pipeline-badge">
-                      <span>{adminSummary.total} Total Registered Case{adminSummary.total === 1 ? '' : 's'}</span>
-                    </div>
-                  </div>
+                {/* Municipal SLA Gauge & Complaint Lifecycle Pipeline Breakdown */}
+                <div className="analytics-overview-row">
+                  <SlaGaugeCard
+                    totalComplaints={adminSummary.activeIssues || 0}
+                    overdueCount={adminOverdueCount}
+                    inProgressCount={
+                      (adminSummary.byStatus?.['In Progress'] || 0) +
+                      (adminSummary.byStatus?.['Under Review'] || 0)
+                    }
+                    resolvedCount={adminSummary.byStatus?.['Resolved'] || 0}
+                    title="Municipal SLA Performance"
+                    subtitle="Real-time metric computed across active municipal caseload"
+                  />
 
-                  <div className="pipeline-stages-row">
-                    <div className="pipeline-stage submitted">
-                      <div className="stage-top">
-                        <span className="stage-indicator-dot" />
-                        <span className="stage-name">Submitted</span>
+                  <section className="admin-status-pipeline-card" aria-label="Complaint Lifecycle Status Distribution">
+                    <div className="pipeline-header">
+                      <div className="pipeline-title-group">
+                        <h3 className="pipeline-title">City-Wide Complaint Lifecycle Pipeline</h3>
+                        <span className="pipeline-subtitle">Live real-time aggregation across all municipal categories</span>
                       </div>
-                      <span className="stage-count">{adminSummary.byStatus['Submitted'] || 0}</span>
-                      <span className="stage-desc">Awaiting Review</span>
-                    </div>
-
-                    <div className="pipeline-stage review">
-                      <div className="stage-top">
-                        <span className="stage-indicator-dot" />
-                        <span className="stage-name">Under Review</span>
+                      <div className="pipeline-badge">
+                        <span>{adminSummary.total} Total Registered Case{adminSummary.total === 1 ? '' : 's'}</span>
                       </div>
-                      <span className="stage-count">{adminSummary.byStatus['Under Review'] || 0}</span>
-                      <span className="stage-desc">Officer Assessing</span>
                     </div>
 
-                    <div className="pipeline-stage progress">
-                      <div className="stage-top">
-                        <span className="stage-indicator-dot" />
-                        <span className="stage-name">In Progress</span>
+                    <div className="pipeline-stages-row">
+                      <div className="pipeline-stage submitted">
+                        <div className="stage-top">
+                          <span className="stage-indicator-dot" />
+                          <span className="stage-name">Submitted</span>
+                        </div>
+                        <span className="stage-count">{adminSummary.byStatus['Submitted'] || 0}</span>
+                        <span className="stage-desc">Awaiting Review</span>
                       </div>
-                      <span className="stage-count">{adminSummary.byStatus['In Progress'] || 0}</span>
-                      <span className="stage-desc">Field Work Underway</span>
-                    </div>
 
-                    <div className="pipeline-stage resolved">
-                      <div className="stage-top">
-                        <span className="stage-indicator-dot" />
-                        <span className="stage-name">Resolved</span>
+                      <div className="pipeline-stage review">
+                        <div className="stage-top">
+                          <span className="stage-indicator-dot" />
+                          <span className="stage-name">Under Review</span>
+                        </div>
+                        <span className="stage-count">{adminSummary.byStatus['Under Review'] || 0}</span>
+                        <span className="stage-desc">Officer Assessing</span>
                       </div>
-                      <span className="stage-count">{adminSummary.byStatus['Resolved'] || 0}</span>
-                      <span className="stage-desc">Closed with Proof</span>
-                    </div>
 
-                    <div className="pipeline-stage rejected">
-                      <div className="stage-top">
-                        <span className="stage-indicator-dot" />
-                        <span className="stage-name">Rejected</span>
+                      <div className="pipeline-stage progress">
+                        <div className="stage-top">
+                          <span className="stage-indicator-dot" />
+                          <span className="stage-name">In Progress</span>
+                        </div>
+                        <span className="stage-count">{adminSummary.byStatus['In Progress'] || 0}</span>
+                        <span className="stage-desc">Field Work Underway</span>
                       </div>
-                      <span className="stage-count">{adminSummary.byStatus['Rejected'] || 0}</span>
-                      <span className="stage-desc">Out of Jurisdiction</span>
+
+                      <div className="pipeline-stage resolved">
+                        <div className="stage-top">
+                          <span className="stage-indicator-dot" />
+                          <span className="stage-name">Resolved</span>
+                        </div>
+                        <span className="stage-count">{adminSummary.byStatus['Resolved'] || 0}</span>
+                        <span className="stage-desc">Closed with Proof</span>
+                      </div>
+
+                      <div className="pipeline-stage rejected">
+                        <div className="stage-top">
+                          <span className="stage-indicator-dot" />
+                          <span className="stage-name">Rejected</span>
+                        </div>
+                        <span className="stage-count">{adminSummary.byStatus['Rejected'] || 0}</span>
+                        <span className="stage-desc">Out of Jurisdiction</span>
+                      </div>
                     </div>
-                  </div>
-                </section>
+                  </section>
+                </div>
 
                 {/* Administrator Lower Grid: Issues Table + Issue Map */}
                 <div className="operations-grid">
@@ -725,6 +876,9 @@ export default function DashboardView() {
           ) : activeNav === 'reports' ? (
             /* Reports & CSV Export View */
             <ReportsView />
+          ) : activeNav === 'settings' ? (
+            /* Role-Aware User Settings & Profile Management View */
+            <SettingsView />
           ) : (activeNav === 'city-map' || activeNav === 'ward-map' || activeNav === 'map') ? (
             /* Dedicated Interactive GIS / Geographic Complaint Map View */
             <section className="map-view-module" aria-label="Geographic Complaint Map View">
@@ -849,6 +1003,7 @@ export default function DashboardView() {
       <ComplaintDetailModal
         complaint={selectedComplaint}
         onClose={() => setSelectedComplaint(null)}
+        onComplaintUpdated={handleComplaintUpdated}
       />
 
       {/* Floating Toast Notification */}

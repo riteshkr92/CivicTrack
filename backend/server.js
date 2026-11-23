@@ -6,6 +6,7 @@ dotenv.config({ path: path.resolve(__dirname, '.env') });
 
 const app = require('./app');
 const { connectDB, disconnectDB } = require('./config/db');
+const { startSlaScheduler, stopSlaScheduler } = require('./services/slaScheduler');
 
 const PORT = parseInt(process.env.PORT, 10) || 5000;
 const MONGO_URI = process.env.MONGO_URI;
@@ -41,6 +42,7 @@ const startServer = async () => {
     server = app.listen(PORT, () => {
       console.log(`[Startup] CivicTrack backend server running on port ${PORT}`);
       console.log(`[Startup] Health endpoint available at http://localhost:${PORT}/api/health`);
+      startSlaScheduler(parseInt(process.env.SLA_EVALUATION_INTERVAL_MS, 10) || 60000);
     });
   } catch (error) {
     console.error(`[Startup Failure] Could not start server: ${error.message}`);
@@ -53,6 +55,8 @@ const startServer = async () => {
  */
 const handleShutdown = async (signal) => {
   console.log(`\n[Shutdown] Received ${signal}. Initiating graceful shutdown...`);
+
+  stopSlaScheduler();
 
   if (server) {
     server.close(() => {

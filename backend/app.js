@@ -4,6 +4,7 @@ const healthRoutes = require('./routes/healthRoutes');
 const authRoutes = require('./routes/authRoutes');
 const complaintRoutes = require('./routes/complaintRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const slaRoutes = require('./routes/slaRoutes');
 
 const app = express();
 
@@ -54,6 +55,7 @@ app.use('/api/health', healthRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/complaints', complaintRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/sla', slaRoutes);
 
 // Root route handler for basic API check
 app.get('/', (req, res) => {

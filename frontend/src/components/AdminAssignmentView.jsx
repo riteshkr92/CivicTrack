@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { fetchAdminComplaints, downloadComplaintsCsv } from '../services/api';
+import { fetchAdminComplaints, downloadComplaintsCsv, fetchSlaOverview, fetchCriticalAttention } from '../services/api';
 import AdminAssignmentModal from './AdminAssignmentModal';
+import SlaPolicyModal from './SlaPolicyModal';
 
 const CATEGORIES = [
   'All Categories',
@@ -18,6 +19,8 @@ const STATUSES = [
   'Submitted',
   'Under Review',
   'In Progress',
+  'Provisionally Resolved',
+  'Disputed',
   'Resolved',
   'Rejected'
 ];
@@ -36,9 +39,14 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
   const [unassignedOnly, setUnassignedOnly] = useState(false);
   const [selectedStatus, setSelectedStatus] = useState('All Statuses');
   const [selectedCategory, setSelectedCategory] = useState('All Categories');
+  const [selectedEscalation, setSelectedEscalation] = useState('');
+  const [selectedCriticalFilter, setSelectedCriticalFilter] = useState('');
+  const [slaOverview, setSlaOverview] = useState(null);
+  const [criticalAttentionData, setCriticalAttentionData] = useState(null);
 
-  // Assignment Modal
+  // Assignment & Policy Modals
   const [assignmentModalComplaint, setAssignmentModalComplaint] = useState(null);
+  const [showPolicyModal, setShowPolicyModal] = useState(false);
 
   const handleExportCsv = async () => {
     if (!token) return;
@@ -76,13 +84,17 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
     const unassigned = currentFilters.unassigned !== undefined ? currentFilters.unassigned : unassignedOnly;
     const st = currentFilters.status !== undefined ? currentFilters.status : selectedStatus;
     const cat = currentFilters.category !== undefined ? currentFilters.category : selectedCategory;
+    const esc = currentFilters.escalationLevel !== undefined ? currentFilters.escalationLevel : selectedEscalation;
+    const crit = currentFilters.criticalAttention !== undefined ? currentFilters.criticalAttention : selectedCriticalFilter;
 
     const res = await fetchAdminComplaints(token, {
       page: targetPage,
       limit: 10,
       unassigned,
       status: st === 'All Statuses' ? '' : st,
-      category: cat === 'All Categories' ? '' : cat
+      category: cat === 'All Categories' ? '' : cat,
+      escalationLevel: esc,
+      criticalAttention: crit
     });
 
     setIsLoading(false);
@@ -97,7 +109,22 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
       }
       setErrorMessage(res.errorMessage);
     }
-  }, [token, unassignedOnly, selectedStatus, selectedCategory, handleUnauthorized]);
+
+    try {
+      const [overviewRes, criticalRes] = await Promise.all([
+        fetchSlaOverview(token),
+        fetchCriticalAttention(token)
+      ]);
+      if (overviewRes.ok && overviewRes.slaOverview) {
+        setSlaOverview(overviewRes.slaOverview);
+      }
+      if (criticalRes.ok && criticalRes.criticalAttention) {
+        setCriticalAttentionData(criticalRes.criticalAttention);
+      }
+    } catch (e) {
+      // Non-fatal
+    }
+  }, [token, unassignedOnly, selectedStatus, selectedCategory, selectedEscalation, selectedCriticalFilter, handleUnauthorized]);
 
   useEffect(() => {
     loadComplaints(1);
@@ -122,6 +149,10 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
         return 'status-review';
       case 'In Progress':
         return 'status-progress';
+      case 'Provisionally Resolved':
+        return 'status-provisional';
+      case 'Disputed':
+        return 'status-disputed';
       case 'Resolved':
         return 'status-resolved';
       case 'Rejected':
@@ -146,6 +177,38 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
     }
   };
 
+  const renderSlaBadge = (c) => {
+    if (c.status === 'Resolved') {
+      return (
+        <span className="sla-badge sla-badge-completed">
+          {c.sla?.isResolvedWithinSla ? '✓ Within SLA' : 'Resolved Overdue'}
+        </span>
+      );
+    }
+    if (c.status === 'Rejected') {
+      return <span className="sla-badge sla-badge-completed">Closed</span>;
+    }
+
+    if (c.sla?.requiresCriticalAttention) {
+      return <span className="sla-badge sla-badge-critical-pulse">🚨 Action Required (L3)</span>;
+    }
+
+    const level = c.sla?.escalationLevel || 0;
+    if (level === 3) {
+      if (c.sla?.criticalAttentionAcknowledgedAt) {
+        return <span className="sla-badge sla-badge-ack">✓ L3 Acknowledged</span>;
+      }
+      return <span className="sla-badge sla-badge-escalated">⚠️ L3 Critical</span>;
+    }
+    if (level === 2 || c.sla?.isBreached) {
+      return <span className="sla-badge sla-badge-breached">⚠️ L2 Breached</span>;
+    }
+    if (level === 1) {
+      return <span className="sla-badge sla-badge-approaching">⏳ L1 Approaching</span>;
+    }
+    return <span className="sla-badge sla-badge-normal">● On Track</span>;
+  };
+
   const handleAssignmentCompleted = (updatedComplaint) => {
     setComplaints((prev) =>
       prev.map((c) => ((c.id || c._id) === (updatedComplaint.id || updatedComplaint._id) ? updatedComplaint : c))
@@ -165,6 +228,15 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
           </p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <button
+            type="button"
+            className="export-csv-btn"
+            style={{ backgroundColor: '#ffffff', color: '#1e293b', border: '1px solid #cbd5e1' }}
+            onClick={() => setShowPolicyModal(true)}
+            title="Configure Municipal SLA Targets"
+          >
+            <span>⚙️ SLA Policy</span>
+          </button>
           <button
             type="button"
             className="export-csv-btn"
@@ -195,6 +267,112 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
         </div>
       )}
 
+      {/* SLA Compliance & Escalation Overview Banner */}
+      {slaOverview && (
+        <div className="sla-overview-banner">
+          <div className="sla-metric-card sla-card-success">
+            <span className="sla-metric-label">Compliance Rate</span>
+            <span className="sla-metric-value">{slaOverview.complianceRate}%</span>
+          </div>
+          <div className="sla-metric-card">
+            <span className="sla-metric-label">Within SLA</span>
+            <span className="sla-metric-value">{slaOverview.withinSla}</span>
+          </div>
+          <div className="sla-metric-card sla-card-warning">
+            <span className="sla-metric-label">Approaching (L1)</span>
+            <span className="sla-metric-value">{slaOverview.approaching}</span>
+          </div>
+          <div className="sla-metric-card sla-card-danger">
+            <span className="sla-metric-label">Breached (L2)</span>
+            <span className="sla-metric-value">{slaOverview.breached}</span>
+          </div>
+          <div className="sla-metric-card sla-card-critical">
+            <span className="sla-metric-label">Critical (L3)</span>
+            <span className="sla-metric-value">{slaOverview.criticallyEscalated}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Critical Attention Panel */}
+      {criticalAttentionData && (criticalAttentionData.criticalCount > 0 || criticalAttentionData.unacknowledgedCount > 0) && (
+        <div className="critical-attention-panel" role="region" aria-label="Critical SLA Attention Panel">
+          <div className="critical-attention-header">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span className="attention-pulse-icon" aria-hidden="true">🚨</span>
+              <h3 className="critical-attention-title">Critical Attention & Supervisory Triage Queue</h3>
+            </div>
+            {criticalAttentionData.oldestCriticalAgeHours !== null && (
+              <span className="critical-age-badge">
+                Oldest Unresolved: <strong>{criticalAttentionData.oldestCriticalAgeHours} hrs</strong>
+              </span>
+            )}
+          </div>
+
+          <div className="critical-attention-metrics">
+            <div
+              className={`critical-metric-box ${selectedCriticalFilter === 'unacknowledged' ? 'active-filter' : ''}`}
+              onClick={() => {
+                const next = selectedCriticalFilter === 'unacknowledged' ? '' : 'unacknowledged';
+                setSelectedCriticalFilter(next);
+                loadComplaints(1, { criticalAttention: next });
+              }}
+              title="Click to filter unacknowledged complaints"
+            >
+              <span className="critical-box-label">Action Required</span>
+              <span className="critical-box-value critical-val-urgent">
+                {criticalAttentionData.unacknowledgedCount}
+              </span>
+              <span className="critical-box-sub">Unacknowledged L3</span>
+            </div>
+
+            <div
+              className={`critical-metric-box ${selectedEscalation === '3' ? 'active-filter' : ''}`}
+              onClick={() => {
+                const next = selectedEscalation === '3' ? '' : '3';
+                setSelectedEscalation(next);
+                loadComplaints(1, { escalationLevel: next });
+              }}
+              title="Click to filter Level 3 complaints"
+            >
+              <span className="critical-box-label">Level 3 Critical</span>
+              <span className="critical-box-value">
+                {criticalAttentionData.criticalCount}
+              </span>
+              <span className="critical-box-sub">Total Escalated</span>
+            </div>
+
+            <div
+              className={`critical-metric-box ${selectedCriticalFilter === 'acknowledged' ? 'active-filter' : ''}`}
+              onClick={() => {
+                const next = selectedCriticalFilter === 'acknowledged' ? '' : 'acknowledged';
+                setSelectedCriticalFilter(next);
+                loadComplaints(1, { criticalAttention: next });
+              }}
+              title="Click to filter acknowledged complaints"
+            >
+              <span className="critical-box-label">Supervisory Review</span>
+              <span className="critical-box-value critical-val-ack">
+                {criticalAttentionData.acknowledgedCount}
+              </span>
+              <span className="critical-box-sub">Acknowledged Cases</span>
+            </div>
+          </div>
+
+          {criticalAttentionData.byDepartment && Object.keys(criticalAttentionData.byDepartment).length > 0 && (
+            <div className="critical-dept-row">
+              <span className="critical-dept-label">Affected Departments:</span>
+              <div className="critical-dept-tags">
+                {Object.entries(criticalAttentionData.byDepartment).map(([dept, count]) => (
+                  <span key={dept} className="critical-dept-tag">
+                    {dept}: <strong>{count}</strong>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Filter Bar */}
       <div className="filter-search-card">
         <div className="filter-inputs-row">
@@ -211,6 +389,22 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
               />
               <span>Unassigned Only</span>
             </label>
+          </div>
+
+          {/* Quick Dispute Queue Filter */}
+          <div className="filter-checkbox-wrap">
+            <button
+              type="button"
+              className={selectedStatus === 'Disputed' ? 'card-btn amber-solid' : 'card-btn secondary-btn'}
+              style={{ fontSize: '0.8rem', padding: '5px 10px', height: '36px' }}
+              onClick={() => {
+                const nextStatus = selectedStatus === 'Disputed' ? 'All Statuses' : 'Disputed';
+                setSelectedStatus(nextStatus);
+                loadComplaints(1, { status: nextStatus });
+              }}
+            >
+              <span>{selectedStatus === 'Disputed' ? 'Showing Disputed' : 'Dispute Review Queue'}</span>
+            </button>
           </div>
 
           {/* Status Dropdown */}
@@ -249,8 +443,42 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
             </select>
           </div>
 
+          {/* SLA Escalation Filter */}
+          <div className="filter-input-wrap">
+            <select
+              className="filter-select-input"
+              value={selectedEscalation}
+              onChange={(e) => {
+                setSelectedEscalation(e.target.value);
+                loadComplaints(1, { escalationLevel: e.target.value });
+              }}
+            >
+              <option value="">All SLA Levels</option>
+              <option value="0">Level 0: Within SLA</option>
+              <option value="1">Level 1: Approaching</option>
+              <option value="2">Level 2: Breached</option>
+              <option value="3">Level 3: Critical Escalation</option>
+            </select>
+          </div>
+
+          {/* Critical Attention Oversight Filter */}
+          <div className="filter-input-wrap">
+            <select
+              className="filter-select-input"
+              value={selectedCriticalFilter}
+              onChange={(e) => {
+                setSelectedCriticalFilter(e.target.value);
+                loadComplaints(1, { criticalAttention: e.target.value });
+              }}
+            >
+              <option value="">All Oversight Status</option>
+              <option value="unacknowledged">🚨 Action Required (Unack)</option>
+              <option value="acknowledged">✓ Acknowledged Oversight</option>
+            </select>
+          </div>
+
           {/* Reset Filters */}
-          {(unassignedOnly || selectedStatus !== 'All Statuses' || selectedCategory !== 'All Categories') && (
+          {(unassignedOnly || selectedStatus !== 'All Statuses' || selectedCategory !== 'All Categories' || selectedEscalation !== '' || selectedCriticalFilter !== '') && (
             <button
               type="button"
               className="card-btn secondary-btn"
@@ -258,7 +486,9 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
                 setUnassignedOnly(false);
                 setSelectedStatus('All Statuses');
                 setSelectedCategory('All Categories');
-                loadComplaints(1, { unassigned: false, status: 'All Statuses', category: 'All Categories' });
+                setSelectedEscalation('');
+                setSelectedCriticalFilter('');
+                loadComplaints(1, { unassigned: false, status: 'All Statuses', category: 'All Categories', escalationLevel: '', criticalAttention: '' });
               }}
             >
               Reset Filters
@@ -313,16 +543,17 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
       ) : (
         /* Complaints Table */
         <div className="complaints-table-wrapper">
-          <table className="complaints-data-table" aria-label="Admin Assignment Management">
+          <table className="complaints-data-table admin-complaints-table" aria-label="Admin Assignment Management">
             <thead>
               <tr>
-                <th scope="col">Tracking ID</th>
-                <th scope="col">Title & Citizen</th>
-                <th scope="col">Category & Priority</th>
-                <th scope="col">Submitted</th>
-                <th scope="col">Status</th>
-                <th scope="col">Assigned Officer</th>
-                <th scope="col" className="text-right">Actions</th>
+                <th scope="col" className="col-tracking">Tracking ID</th>
+                <th scope="col" className="col-main-info">Title & Citizen</th>
+                <th scope="col" className="col-category-priority">Category & Priority</th>
+                <th scope="col" className="col-sla">SLA Status</th>
+                <th scope="col" className="col-date">Submitted</th>
+                <th scope="col" className="col-status">Status</th>
+                <th scope="col" className="col-officer">Assigned Officer</th>
+                <th scope="col" className="col-actions text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -331,10 +562,15 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
                   <td className="tracking-cell">
                     <span className="tracking-badge-pill">{c.trackingId}</span>
                   </td>
-                  <td className="main-info-cell">
-                    <div className="complaint-table-title">{c.title}</div>
-                    <div className="complaint-table-address">
-                      Citizen: {c.citizen?.name || 'Citizen'} &bull; {c.location?.address || 'Address pending'}
+                  <td className="main-info-cell admin-main-info-cell">
+                    <div className="complaint-table-title" title={c.title}>{c.title}</div>
+                    <div className="complaint-table-citizen">
+                      <span className="citizen-icon-tag" aria-hidden="true">👤</span>
+                      <span className="citizen-name-text">Citizen: <strong>{c.citizen?.name || 'Citizen'}</strong></span>
+                    </div>
+                    <div className="complaint-table-address" title={c.location?.address || 'Address pending'}>
+                      <span className="address-icon-tag" aria-hidden="true">📍</span>
+                      <span>{c.location?.address || 'Address pending'}</span>
                     </div>
                   </td>
                   <td>
@@ -344,6 +580,9 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
                         {c.priority}
                       </span>
                     </div>
+                  </td>
+                  <td className="sla-cell">
+                    {renderSlaBadge(c)}
                   </td>
                   <td className="date-cell">
                     {formatDate(c.createdAt)}
@@ -365,23 +604,26 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
                       <span className="unassigned-badge-pill">Unassigned</span>
                     )}
                   </td>
-                  <td className="text-right">
-                    <div className="officer-actions-cell">
+                  <td className="text-right actions-cell">
+                    <div className="officer-actions-cell admin-actions-cell">
                       <button
                         type="button"
-                        className="view-detail-btn"
+                        className={c.status === 'Disputed' ? 'action-btn-assign' : 'view-detail-btn'}
+                        style={c.status === 'Disputed' ? { backgroundColor: '#ea580c', borderColor: '#c2410c' } : {}}
                         onClick={() => onSelectComplaint && onSelectComplaint(c)}
                         aria-label={`View details for complaint ${c.trackingId}`}
                       >
-                        Details
+                        {c.status === 'Disputed' ? 'Review Dispute' : 'Details'}
                       </button>
-                      <button
-                        type="button"
-                        className="action-btn-assign"
-                        onClick={() => setAssignmentModalComplaint(c)}
-                      >
-                        {c.assignedOfficer ? 'Reassign' : 'Assign Officer'}
-                      </button>
+                      {c.status !== 'Disputed' && (
+                        <button
+                          type="button"
+                          className="action-btn-assign"
+                          onClick={() => setAssignmentModalComplaint(c)}
+                        >
+                          {c.assignedOfficer ? 'Reassign' : 'Assign Officer'}
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -425,6 +667,15 @@ export default function AdminAssignmentView({ onSelectComplaint, onComplaintAssi
           token={token}
           onClose={() => setAssignmentModalComplaint(null)}
           onAssigned={handleAssignmentCompleted}
+        />
+      )}
+
+      {/* SLA Policy Administration Modal */}
+      {showPolicyModal && (
+        <SlaPolicyModal
+          token={token}
+          onClose={() => setShowPolicyModal(false)}
+          onPolicyUpdated={() => loadComplaints(pagination.page)}
         />
       )}
     </div>

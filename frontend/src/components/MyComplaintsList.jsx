@@ -17,6 +17,8 @@ const STATUSES = [
   'Submitted',
   'Under Review',
   'In Progress',
+  'Provisionally Resolved',
+  'Disputed',
   'Resolved',
   'Rejected'
 ];
@@ -119,6 +121,10 @@ export default function MyComplaintsList({ onSelectComplaint, onNavigateReport }
         return 'status-review';
       case 'In Progress':
         return 'status-progress';
+      case 'Provisionally Resolved':
+        return 'status-provisional';
+      case 'Disputed':
+        return 'status-disputed';
       case 'Resolved':
         return 'status-resolved';
       case 'Rejected':

@@ -451,7 +451,7 @@ async function runStep10Tests() {
       resolutionNotes: 'Asphalt resurfacing completed. Road reopened for vehicular traffic.'
     }
   });
-  assert(resolveRes.status === 200 && resolveRes.data?.complaint?.status === 'Resolved', '27. Officer successfully transitions status to "Resolved" with verified notes');
+  assert(resolveRes.status === 400, '27. Direct officer resolution attempt rejected (400 Bad Request - completion evidence required)');
 
   // 19. Admin summary metrics check
   const adminSummaryRes = await apiRequest({

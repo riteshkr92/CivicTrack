@@ -4,12 +4,12 @@ import { updateComplaintStatus } from '../services/api';
 const PERMITTED_NEXT_STATUSES = {
   'Submitted': ['Under Review', 'Rejected'],
   'Under Review': ['In Progress', 'Rejected'],
-  'In Progress': ['Resolved', 'Rejected'],
+  'In Progress': ['Rejected'],
   'Resolved': [],
   'Rejected': []
 };
 
-export default function StatusUpdateModal({ complaint, token, onClose, onUpdated }) {
+export default function StatusUpdateModal({ complaint, token, onClose, onUpdated, onOpenCompletion }) {
   const currentStatus = complaint?.status || 'Submitted';
   const allowedNext = PERMITTED_NEXT_STATUSES[currentStatus] || [];
   const isTerminal = allowedNext.length === 0;
@@ -128,6 +128,25 @@ export default function StatusUpdateModal({ complaint, token, onClose, onUpdated
               </div>
             ) : (
               <>
+                {currentStatus === 'In Progress' && onOpenCompletion && (
+                  <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '12px', marginBottom: '16px' }}>
+                    <div style={{ fontWeight: 600, fontSize: '0.86rem', color: '#166534', marginBottom: '4px' }}>
+                      Work is Currently In Progress
+                    </div>
+                    <div style={{ fontSize: '0.8rem', color: '#15803d', marginBottom: '10px' }}>
+                      To complete this work and advance to citizen review, municipal policy requires submitting geo-verified photographic evidence and GPS coordinates.
+                    </div>
+                    <button
+                      type="button"
+                      className="card-btn"
+                      style={{ backgroundColor: '#16a34a', color: '#ffffff', border: 'none', padding: '6px 14px', fontSize: '0.82rem', fontWeight: 600 }}
+                      onClick={() => onOpenCompletion(complaint)}
+                    >
+                      📸 Submit Work Completion Evidence
+                    </button>
+                  </div>
+                )}
+
                 {/* Permitted Next Status Selector */}
                 <div className="form-field-group">
                   <label htmlFor="target-status-select" className="form-label">

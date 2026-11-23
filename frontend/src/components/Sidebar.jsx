@@ -2,11 +2,27 @@ import React from 'react';
 import { useAuth } from '../context/AuthContext';
 
 export default function Sidebar({ isOpen, onClose, activeNav = 'overview', onSelectNav }) {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const role = user?.role || 'citizen';
 
   // Build role-specific navigation sections
   const getNavSections = () => {
+    const settingsSection = {
+      title: 'Preferences',
+      items: [
+        {
+          id: 'settings',
+          label: 'Settings',
+          icon: (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          )
+        }
+      ]
+    };
+
     // 1. Citizen Navigation
     if (role === 'citizen') {
       return [
@@ -62,7 +78,8 @@ export default function Sidebar({ isOpen, onClose, activeNav = 'overview', onSel
               )
             }
           ]
-        }
+        },
+        settingsSection
       ];
     }
 
@@ -85,7 +102,7 @@ export default function Sidebar({ isOpen, onClose, activeNav = 'overview', onSel
           ]
         },
         {
-          title: 'Department Operations',
+          title: 'Operations',
           items: [
             {
               id: 'assigned-tasks',
@@ -122,7 +139,8 @@ export default function Sidebar({ isOpen, onClose, activeNav = 'overview', onSel
               )
             }
           ]
-        }
+        },
+        settingsSection
       ];
     }
 
@@ -166,18 +184,6 @@ export default function Sidebar({ isOpen, onClose, activeNav = 'overview', onSel
             )
           },
           {
-            id: 'team',
-            label: 'Officer Oversight',
-            icon: (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                <circle cx="9" cy="7" r="4" />
-                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-              </svg>
-            )
-          },
-          {
             id: 'reports',
             label: 'Reports & CSV',
             icon: (
@@ -190,7 +196,25 @@ export default function Sidebar({ isOpen, onClose, activeNav = 'overview', onSel
             )
           }
         ]
-      }
+      },
+      {
+        title: 'Management',
+        items: [
+          {
+            id: 'team',
+            label: 'Officer Oversight',
+            icon: (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+              </svg>
+            )
+          }
+        ]
+      },
+      settingsSection
     ];
   };
 
@@ -258,9 +282,34 @@ export default function Sidebar({ isOpen, onClose, activeNav = 'overview', onSel
         </nav>
 
         <div className="sidebar-footer">
-          <div className="system-tag">
-            <span className="system-tag-dot" />
-            <span>Role: {role.toUpperCase()}</span>
+          <div className="sidebar-user-card">
+            <div className="sidebar-user-avatar" aria-hidden="true">
+              {user?.name
+                ? user.name
+                    .split(' ')
+                    .filter(Boolean)
+                    .slice(0, 2)
+                    .map((p) => p[0].toUpperCase())
+                    .join('')
+                : 'CT'}
+            </div>
+            <div className="sidebar-user-info">
+              <span className="sidebar-user-name">{user?.name || 'Authorized User'}</span>
+              <span className="sidebar-user-role">{role.toUpperCase()}</span>
+            </div>
+            <button
+              type="button"
+              className="sidebar-logout-btn"
+              onClick={logout}
+              title="Sign Out"
+              aria-label="Sign Out of CivicTrack"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+            </button>
           </div>
         </div>
       </aside>

@@ -1,4 +1,8 @@
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const multer = require('multer');
 const User = require('../models/User');
 const generateToken = require('../utils/generateToken');
 const { authenticate, authorize } = require('../middleware/authMiddleware');
@@ -6,6 +10,47 @@ const { authenticate, authorize } = require('../middleware/authMiddleware');
 const router = express.Router();
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Upload directory configuration for user avatars
+const rawUploadDir = process.env.UPLOAD_DIR || 'uploads';
+const UPLOAD_DIR = path.isAbsolute(rawUploadDir)
+  ? rawUploadDir
+  : path.resolve(__dirname, '..', rawUploadDir);
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+
+// Canonical path traversal guard
+const isPathInsideDirectory = (baseDir, targetPath) => {
+  if (!baseDir || !targetPath) return false;
+  const resolvedBase = path.resolve(baseDir);
+  const resolvedTarget = path.resolve(targetPath);
+  const relative = path.relative(resolvedBase, resolvedTarget);
+  return !relative.startsWith('..') && !path.isAbsolute(relative);
+};
+
+// Avatar multer configuration
+const avatarStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const cleanExt = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext) ? ext : '.jpg';
+    cb(null, `avatar-${req.user._id}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}${cleanExt}`);
+  }
+});
+
+const uploadAvatarMiddleware = multer({
+  storage: avatarStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+    if (allowed.includes(file.mimetype.toLowerCase())) {
+      cb(null, true);
+    } else {
+      cb(new Error('Unsupported file format. Only JPEG, PNG, and WebP images are permitted for avatars.'));
+    }
+  }
+});
 
 /**
  * @route   POST /api/auth/register
@@ -258,6 +303,419 @@ router.post('/officers', authenticate, authorize('admin'), async (req, res, next
         message: messages.join(', ')
       });
     }
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/auth/profile
+ * @desc    Get detailed user profile of the authenticated user
+ * @access  Protected
+ */
+router.get('/profile', authenticate, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'User profile not found.'
+      });
+    }
+    return res.status(200).json({
+      user: user.toSafeObject()
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   PATCH /api/auth/profile
+ * @desc    Update permitted profile fields for the authenticated user
+ * @access  Protected
+ */
+router.patch('/profile', authenticate, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id).select('+password');
+    if (!user) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'User not found.'
+      });
+    }
+
+    const {
+      name,
+      phone,
+      address,
+      email,
+      currentPassword,
+      role,
+      department,
+      employeeId,
+      designation
+    } = req.body;
+
+    // Strict Authorization Guards: reject unauthorized attempts to modify immutable/privileged attributes
+    if (role !== undefined && role !== user.role) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Role escalation and role modifications are strictly forbidden.'
+      });
+    }
+
+    if (department !== undefined && department !== user.department) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Department modification is restricted to administrative dispatch.'
+      });
+    }
+
+    if (employeeId !== undefined && employeeId !== user.employeeId) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Employee ID is an immutable administrative identifier.'
+      });
+    }
+
+    if (designation !== undefined && designation !== user.designation) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Designation is an immutable administrative attribute.'
+      });
+    }
+
+    // Permitted Name Update
+    if (name !== undefined) {
+      const trimmedName = typeof name === 'string' ? name.trim() : '';
+      if (trimmedName.length < 2 || trimmedName.length > 100) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Full name must be between 2 and 100 characters long.'
+        });
+      }
+      user.name = trimmedName;
+    }
+
+    // Permitted Phone Number Update
+    if (phone !== undefined) {
+      const trimmedPhone = typeof phone === 'string' ? phone.trim() : '';
+      if (trimmedPhone.length > 20) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Phone number cannot exceed 20 characters.'
+        });
+      }
+      user.phone = trimmedPhone;
+    }
+
+    // Permitted Address Update (Citizen)
+    if (address !== undefined) {
+      const trimmedAddress = typeof address === 'string' ? address.trim() : '';
+      if (trimmedAddress.length > 250) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Address cannot exceed 250 characters.'
+        });
+      }
+      user.address = trimmedAddress;
+    }
+
+    // Safe Email Address Update
+    if (email !== undefined) {
+      const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+      if (normalizedEmail !== user.email) {
+        // Enforce invariant: designated administrator email cannot be modified
+        if (user.role === 'admin' || user.email === 'admin@civictrack.gov') {
+          return res.status(403).json({
+            error: 'Forbidden',
+            message: 'The designated administrator account email cannot be modified.'
+          });
+        }
+
+        if (!EMAIL_REGEX.test(normalizedEmail)) {
+          return res.status(400).json({
+            error: 'Bad Request',
+            message: 'Please provide a valid email address.'
+          });
+        }
+
+        // Require current password verification to change email address
+        if (!currentPassword) {
+          return res.status(400).json({
+            error: 'Bad Request',
+            message: 'Current password is required to change your account email address.'
+          });
+        }
+
+        const isPasswordValid = await user.matchPassword(currentPassword);
+        if (!isPasswordValid) {
+          return res.status(401).json({
+            error: 'Unauthorized',
+            message: 'Current password verification failed. Email was not updated.'
+          });
+        }
+
+        // Check for collision with existing accounts
+        const existingEmailUser = await User.findOne({
+          email: normalizedEmail,
+          _id: { $ne: user._id }
+        });
+        if (existingEmailUser) {
+          return res.status(409).json({
+            error: 'Conflict',
+            message: 'An account with this email address already exists.'
+          });
+        }
+
+        user.email = normalizedEmail;
+      }
+    }
+
+    await user.save();
+
+    return res.status(200).json({
+      message: 'Profile details saved successfully.',
+      user: user.toSafeObject()
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: 'An account with this email address already exists.'
+      });
+    }
+    next(error);
+  }
+});
+
+/**
+ * @route   PATCH /api/auth/change-password
+ * @desc    Change password for the authenticated user
+ * @access  Protected
+ */
+router.patch('/change-password', authenticate, async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword, confirmPassword } = req.body;
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Current password, new password, and confirmation password are all required.'
+      });
+    }
+
+    if (typeof newPassword !== 'string' || newPassword.length < 6 || newPassword.length > 128) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'New password must be between 6 and 128 characters long.'
+      });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'New password and confirmation password do not match.'
+      });
+    }
+
+    const user = await User.findById(req.user._id).select('+password');
+    if (!user) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'User account not found.'
+      });
+    }
+
+    const isCurrentMatch = await user.matchPassword(currentPassword);
+    if (!isCurrentMatch) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Current password is incorrect.'
+      });
+    }
+
+    if (currentPassword === newPassword) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'New password must be different from current password.'
+      });
+    }
+
+    // Set new password (pre-save hook will hash it with bcrypt salt 10)
+    user.password = newPassword;
+    await user.save();
+
+    return res.status(200).json({
+      message: 'Password changed successfully. Please use your new password on your next sign-in.'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/auth/notifications/preferences
+ * @desc    Get notification preferences for authenticated user
+ * @access  Protected
+ */
+router.get('/notifications/preferences', authenticate, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id).select('notificationPreferences');
+    if (!user) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'User account not found.'
+      });
+    }
+
+    return res.status(200).json({
+      preferences: user.notificationPreferences || {
+        complaintStatusUpdates: true,
+        complaintAssignments: true,
+        slaWarningsAndBreaches: true,
+        resolutionDisputeUpdates: true
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   PATCH /api/auth/notifications/preferences
+ * @desc    Update notification preferences for authenticated user
+ * @access  Protected
+ */
+router.patch('/notifications/preferences', authenticate, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'User account not found.'
+      });
+    }
+
+    const {
+      complaintStatusUpdates,
+      complaintAssignments,
+      slaWarningsAndBreaches,
+      resolutionDisputeUpdates
+    } = req.body;
+
+    if (!user.notificationPreferences) {
+      user.notificationPreferences = {
+        complaintStatusUpdates: true,
+        complaintAssignments: true,
+        slaWarningsAndBreaches: true,
+        resolutionDisputeUpdates: true
+      };
+    }
+
+    if (typeof complaintStatusUpdates === 'boolean') {
+      user.notificationPreferences.complaintStatusUpdates = complaintStatusUpdates;
+    }
+    if (typeof complaintAssignments === 'boolean') {
+      user.notificationPreferences.complaintAssignments = complaintAssignments;
+    }
+    if (typeof slaWarningsAndBreaches === 'boolean') {
+      user.notificationPreferences.slaWarningsAndBreaches = slaWarningsAndBreaches;
+    }
+    if (typeof resolutionDisputeUpdates === 'boolean') {
+      user.notificationPreferences.resolutionDisputeUpdates = resolutionDisputeUpdates;
+    }
+
+    await user.save();
+
+    return res.status(200).json({
+      message: 'Notification preferences updated successfully.',
+      preferences: user.notificationPreferences
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   POST /api/auth/profile/avatar
+ * @desc    Upload profile picture for authenticated user
+ * @access  Protected
+ */
+router.post('/profile/avatar', authenticate, (req, res, next) => {
+  uploadAvatarMiddleware.single('avatar')(req, res, async (err) => {
+    if (err) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: err.message
+      });
+    }
+    if (!req.file) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Avatar image file is required.'
+      });
+    }
+
+    try {
+      const user = await User.findById(req.user._id);
+      if (!user) {
+        return res.status(404).json({
+          error: 'Not Found',
+          message: 'User not found.'
+        });
+      }
+
+      // Clean up previous avatar file if exists
+      if (user.avatar) {
+        const oldPath = path.resolve(UPLOAD_DIR, user.avatar);
+        if (isPathInsideDirectory(UPLOAD_DIR, oldPath) && fs.existsSync(oldPath)) {
+          try {
+            fs.unlinkSync(oldPath);
+          } catch (_) {}
+        }
+      }
+
+      user.avatar = req.file.filename;
+      await user.save();
+
+      return res.status(200).json({
+        message: 'Profile avatar uploaded successfully.',
+        avatar: user.avatar,
+        user: user.toSafeObject()
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+});
+
+/**
+ * @route   GET /api/auth/profile/avatar
+ * @desc    Stream profile picture of authenticated user
+ * @access  Protected
+ */
+router.get('/profile/avatar', authenticate, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user || !user.avatar) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'No profile avatar configured.'
+      });
+    }
+
+    const filePath = path.resolve(UPLOAD_DIR, user.avatar);
+    if (!isPathInsideDirectory(UPLOAD_DIR, filePath) || !fs.existsSync(filePath)) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Avatar image not found on disk.'
+      });
+    }
+
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    return res.sendFile(filePath);
+  } catch (error) {
     next(error);
   }
 });

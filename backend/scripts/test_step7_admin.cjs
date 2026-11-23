@@ -325,7 +325,7 @@ async function runStep7Tests() {
       status: 'Resolved',
       resolutionNotes: 'Crater filled with cold-mix asphalt, leveled, and sealed with bitumen.'
     });
-    assert(resolveRes.status === 200 && resolveRes.body?.complaint?.status === 'Resolved', 'Officer resolved complaint with verified resolution notes');
+    assert(resolveRes.status === 400, 'Direct officer status transition to Resolved rejected (400 Bad Request - requires completion evidence)');
 
     // Step 6d: Final Admin summary check
     const finalSummary = await request({

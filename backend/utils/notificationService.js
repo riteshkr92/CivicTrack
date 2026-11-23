@@ -1,4 +1,5 @@
 const { Notification } = require('../models/Notification');
+const User = require('../models/User');
 
 /**
  * Dispatch an in-app notification securely on the backend.
@@ -28,6 +29,24 @@ async function sendNotification({
   }
 
   try {
+    // Respect recipient notification preferences if explicitly disabled
+    const recipientUser = await User.findById(recipient).select('notificationPreferences');
+    if (recipientUser && recipientUser.notificationPreferences) {
+      const prefs = recipientUser.notificationPreferences;
+      if (['status_changed', 'complaint_resolved', 'notes_updated'].includes(type) && prefs.complaintStatusUpdates === false) {
+        return null;
+      }
+      if (['complaint_assigned', 'complaint_reassigned'].includes(type) && prefs.complaintAssignments === false) {
+        return null;
+      }
+      if (['sla_warning', 'sla_breached', 'sla_escalated', 'sla_rework_warning', 'sla_rework_breached'].includes(type) && prefs.slaWarningsAndBreaches === false) {
+        return null;
+      }
+      if (['work_completed', 'resolution_confirmed', 'resolution_disputed', 'resolution_admin_closed', 'resolution_reopened'].includes(type) && prefs.resolutionDisputeUpdates === false) {
+        return null;
+      }
+    }
+
     // Event-specific deduplication guard: avoid double-creation for the identical event within 5 seconds
     const fiveSecondsAgo = new Date(Date.now() - 5000);
     const existing = await Notification.findOne({

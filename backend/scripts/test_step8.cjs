@@ -490,16 +490,28 @@ async function runStep8Tests() {
       markResolved: true
     }
   });
-  assert(resolveRes.status === 200, '34. Officer submits resolution record');
+  assert(resolveRes.status === 400, '34. Officer direct resolution attempt via resolution route is rejected (400 Bad Request - completion evidence required)');
 
-  // Verify citizen receives resolution notification
+  // Officer records interim resolution notes without direct resolution bypass
+  const notesRes = await apiRequest({
+    method: 'PATCH',
+    path: `/api/complaints/${createdComplaintId}/resolution`,
+    headers: { Authorization: `Bearer ${officerToken}` },
+    body: {
+      resolutionNotes: 'Streetlight pole re-anchored, ballast replaced, and LED unit verified illuminated.',
+      markResolved: false
+    }
+  });
+  assert(notesRes.status === 200, '34b. Officer records interim resolution notes successfully');
+
+  // Verify citizen receives notification
   const citizenNotifsAfterResolve = await apiRequest({
     method: 'GET',
     path: '/api/notifications',
     headers: { Authorization: `Bearer ${citizenToken}` }
   });
-  const resolveNotif = citizenNotifsAfterResolve.data.notifications.find(n => n.type === 'complaint_resolved');
-  assert(Boolean(resolveNotif), '35. Citizen received verified complaint_resolved notification');
+  const resolveNotif = citizenNotifsAfterResolve.data.notifications.find(n => n.type === 'notes_updated');
+  assert(Boolean(resolveNotif), '35. Citizen received verified notes_updated notification');
 
   // Test PATCH /api/notifications/:id/read
   if (resolveNotif) {

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { downloadComplaintsCsv } from '../services/api';
 
-const STATUS_OPTIONS = ['All', 'Submitted', 'Under Review', 'In Progress', 'Resolved', 'Rejected'];
+const STATUS_OPTIONS = ['All', 'Submitted', 'Under Review', 'In Progress', 'Provisionally Resolved', 'Disputed', 'Resolved', 'Rejected'];
 const CATEGORY_OPTIONS = [
   'All',
   'Pothole/Road Damage',
@@ -52,6 +52,10 @@ export default function IssuesTable({
         return 'status-review';
       case 'In Progress':
         return 'status-progress';
+      case 'Provisionally Resolved':
+        return 'status-provisional';
+      case 'Disputed':
+        return 'status-disputed';
       case 'Resolved':
         return 'status-resolved';
       case 'Rejected':
@@ -61,10 +65,103 @@ export default function IssuesTable({
     }
   };
 
+  const getCategoryIcon = (category) => {
+    const cat = (category || '').toLowerCase();
+    if (cat.includes('pothole') || cat.includes('road')) {
+      return (
+        <div className="cat-icon-circle cat-road" title="Road / Infrastructure Damage" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="6" width="20" height="12" rx="2" />
+            <path d="M6 12h.01M12 12h.01M18 12h.01" />
+          </svg>
+        </div>
+      );
+    }
+    if (cat.includes('light') || cat.includes('street')) {
+      return (
+        <div className="cat-icon-circle cat-light" title="Streetlight Issue" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+            <circle cx="12" cy="12" r="4" />
+          </svg>
+        </div>
+      );
+    }
+    if (cat.includes('garbage') || cat.includes('waste')) {
+      return (
+        <div className="cat-icon-circle cat-waste" title="Garbage / Sanitation" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="3 6 5 6 21 6" />
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+          </svg>
+        </div>
+      );
+    }
+    if (cat.includes('drainage') || cat.includes('water')) {
+      return (
+        <div className="cat-icon-circle cat-water" title="Water / Drainage" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z" />
+          </svg>
+        </div>
+      );
+    }
+    return (
+      <div className="cat-icon-circle cat-other" title={category || 'Civic Issue'} aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <line x1="12" y1="8" x2="12" y2="12" />
+          <line x1="12" y1="16" x2="12.01" y2="16" />
+        </svg>
+      </div>
+    );
+  };
+
+  const getPriorityBadge = (priority) => {
+    const p = (priority || 'Medium').toLowerCase();
+    if (p === 'urgent' || p === 'high') {
+      return (
+        <span className="priority-pill high" title="High Priority">
+          <span className="priority-dot" /> High
+        </span>
+      );
+    }
+    if (p === 'low') {
+      return (
+        <span className="priority-pill low" title="Low Priority">
+          <span className="priority-dot" /> Low
+        </span>
+      );
+    }
+    return (
+      <span className="priority-pill medium" title="Medium Priority">
+        <span className="priority-dot" /> Medium
+      </span>
+    );
+  };
+
+  const getSlaPill = (issue) => {
+    if (issue.sla?.isBreached) {
+      return <span className="sla-pill breached" title="SLA Breached">⚠️ Breached</span>;
+    }
+    if (issue.sla?.remainingHours !== undefined && issue.sla.remainingHours !== null) {
+      const rem = issue.sla.remainingHours;
+      if (rem <= 0) {
+        return <span className="sla-pill breached" title="Past SLA target">⏱️ Overdue</span>;
+      }
+      if (rem <= 24) {
+        return <span className="sla-pill tight" title={`${Math.round(rem)} hours remaining`}>⏱️ {Math.round(rem)}h left</span>;
+      }
+      const days = (rem / 24).toFixed(1);
+      return <span className="sla-pill ok" title={`${days} days remaining`}>⏱️ {days}d left</span>;
+    }
+    return <span className="sla-pill ok" title="Within SLA timeframe">⏱️ Within SLA</span>;
+  };
+
   const getTitle = () => {
-    if (isCitizen) return 'My Recent Complaints';
+    if (isCitizen) return 'Recent Complaints';
     if (isOfficer) return 'Assigned Field Queue';
-    return 'Active Complaints & Triage';
+    return 'High-Priority Issues';
   };
 
   // Filter complaints locally
@@ -109,7 +206,6 @@ export default function IssuesTable({
           </span>
         </div>
 
-        {/* Step 8/9: CSV Export Action & Step 1 View All Link */}
         <div className="issues-actions-right">
           {onViewAllComplaints && (
             <button
@@ -118,7 +214,7 @@ export default function IssuesTable({
               onClick={onViewAllComplaints}
               title="View all complaints on My Complaints page"
             >
-              <span>View All Complaints &rarr;</span>
+              <span>View All &rarr;</span>
             </button>
           )}
           <button
@@ -195,7 +291,7 @@ export default function IssuesTable({
       {isLoading ? (
         <div className="table-loading-container" aria-live="polite">
           <div className="table-loading-spinner" aria-hidden="true" />
-          <span className="table-loading-text">Loading recent complaints from database...</span>
+          <span className="table-loading-text">Loading complaints from database...</span>
         </div>
       ) : filteredComplaints.length === 0 ? (
         <div className="table-empty-container">
@@ -243,22 +339,30 @@ export default function IssuesTable({
               <span>Report an Issue</span>
             </button>
           )}
-          <div className="table-empty-status-tag">
-            <span>Database Status: {complaints.length} records in collection</span>
-          </div>
         </div>
       ) : (
         <div className="issues-list" role="list">
           {filteredComplaints.map((issue) => {
-            const locationText = issue.location?.address || (typeof issue.location === 'string' ? issue.location : 'Location pending');
-            const formattedDate = formatDate(issue.createdAt);
+            const hasCoords =
+              issue.location?.latitude !== undefined &&
+              issue.location?.latitude !== null &&
+              issue.location?.longitude !== undefined &&
+              issue.location?.longitude !== null;
+            const coordsText = hasCoords
+              ? `${Number(issue.location.latitude).toFixed(4)}, ${Number(issue.location.longitude).toFixed(4)}`
+              : null;
+            const addressText =
+              issue.location?.address ||
+              (typeof issue.location === 'string' ? issue.location : null);
+            const locationDisplay = coordsText || addressText || 'Location logged';
+
             return (
               <div
                 key={issue.id || issue._id}
-                className={`issue-row ${onSelectComplaint ? 'clickable-row' : ''}`}
+                className="issue-row clickable-row"
                 role="listitem"
                 onClick={() => onSelectComplaint && onSelectComplaint(issue)}
-                tabIndex={onSelectComplaint ? 0 : undefined}
+                tabIndex={0}
                 onKeyDown={(e) => {
                   if (onSelectComplaint && (e.key === 'Enter' || e.key === ' ')) {
                     e.preventDefault();
@@ -266,36 +370,59 @@ export default function IssuesTable({
                   }
                 }}
               >
+                {/* 1. Category Icon Box */}
+                {getCategoryIcon(issue.category)}
+
+                {/* 2. Main Issue Info */}
                 <div className="issue-main-info">
-                  <div className="issue-title-line">
-                    {issue.trackingId && (
-                      <span className="tracking-badge-pill-sm">{issue.trackingId}</span>
-                    )}
+                  <div className="issue-title-row">
                     <span className="issue-title-text">{issue.title}</span>
-                    {issue.category && (
-                      <span className="issue-category-badge">{issue.category}</span>
-                    )}
                   </div>
                   <div className="issue-coord-text">
-                    {formattedDate && (
-                      <span className="issue-date-tag">{formattedDate}</span>
-                    )}
-                    {formattedDate && locationText && <span className="meta-sep">&bull;</span>}
-                    <span className="issue-location-tag">{locationText}</span>
-                    {issue.assignedOfficer && (
-                      <span className="issue-officer-attribution">
-                        &bull; Officer: <strong>{issue.assignedOfficer.name}</strong>
-                      </span>
-                    )}
-                    {issue.hasEvidence && (
-                      <span className="evidence-chip-indicator" title="Geotagged photographic evidence attached">
-                        &bull; Photo Verified
-                      </span>
+                    <span className="issue-location-tag">{locationDisplay}</span>
+                    {issue.trackingId && (
+                      <span className="issue-tracking-inline">&bull; {issue.trackingId}</span>
                     )}
                   </div>
                 </div>
+
+                {/* 3. Priority Pill */}
+                <div className="issue-priority-cell">
+                  {getPriorityBadge(issue.priority)}
+                </div>
+
+                {/* 4. SLA Indicator Pill */}
+                <div className="issue-sla-cell">
+                  {getSlaPill(issue)}
+                </div>
+
+                {/* 5. Status Badge */}
                 <div className="issue-status-cell">
-                  <span className={`status-pill ${getStatusClass(issue.status)}`}>{issue.status}</span>
+                  <span className={`status-pill ${getStatusClass(issue.status)}`}>
+                    {issue.status}
+                  </span>
+                </div>
+
+                {/* 6. Action Button */}
+                <div className="issue-action-cell">
+                  <button
+                    type="button"
+                    className="issue-row-action-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (onActionClick) {
+                        onActionClick(issue);
+                      } else if (onSelectComplaint) {
+                        onSelectComplaint(issue);
+                      }
+                    }}
+                    title="Inspect complaint details"
+                  >
+                    <span>{role === 'admin' && issue.status === 'Submitted' ? 'Assign' : 'View'}</span>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                  </button>
                 </div>
               </div>
             );
@@ -304,8 +431,8 @@ export default function IssuesTable({
       )}
 
       <div className="issues-panel-footer">
-        <span>Displaying {filteredComplaints.length} of {complaints.length} records</span>
-        <span className="verified-database-tag">Verified Mongoose Collection</span>
+        <span>Showing 1-{filteredComplaints.length} of {complaints.length} complaints</span>
+        <span className="verified-database-tag">&bull; Live MongoDB Records</span>
       </div>
     </section>
   );

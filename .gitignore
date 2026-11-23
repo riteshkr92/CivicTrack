@@ -45,3 +45,7 @@ uploads/
 backend/uploads/
 !backend/uploads/.gitkeep
 
+
+# Local temporary files
+scratch/
+Screenshot 2026-10-13 171222.png

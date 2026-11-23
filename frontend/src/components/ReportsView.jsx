@@ -7,6 +7,8 @@ const STATUS_OPTIONS = [
   'Submitted',
   'Under Review',
   'In Progress',
+  'Provisionally Resolved',
+  'Disputed',
   'Resolved',
   'Rejected'
 ];

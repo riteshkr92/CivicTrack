@@ -10,17 +10,31 @@ const { authenticate, authorize } = require('../middleware/authMiddleware');
 const { extractExifGps, calculateDistanceMeters, validateImageMagicBytes } = require('../utils/exifParser');
 const { sendNotification } = require('../utils/notificationService');
 const { analyzeComplaint, findPotentialDuplicates } = require('../utils/aiService');
+const { calculateSlaDeadlines, calculateReworkDeadline } = require('../config/slaPolicy');
 
 const router = express.Router();
 
-// Apply authentication to ALL complaint endpoints
-router.use(authenticate);
+// Middleware: Authenticate requests, supporting optional authentication for public tracking references
+const authenticateOrOptional = (req, res, next) => {
+  if (req.method === 'GET' && req.path.startsWith('/track/')) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      req.user = null;
+      return next();
+    }
+  }
+  return authenticate(req, res, next);
+};
+
+router.use(authenticateOrOptional);
 
 // Permitted status state machine transitions
 const PERMITTED_TRANSITIONS = {
   'Submitted': ['Under Review', 'Rejected'],
   'Under Review': ['In Progress', 'Rejected'],
-  'In Progress': ['Resolved', 'Rejected'],
+  'In Progress': ['Provisionally Resolved', 'Rejected'],
+  'Provisionally Resolved': ['Resolved', 'Disputed'],
+  'Disputed': ['Resolved', 'In Progress'],
   'Resolved': [], // Terminal state
   'Rejected': [] // Terminal state
 };
@@ -39,7 +53,12 @@ const storage = multer.diskStorage({
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     const cleanExt = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext) ? ext : '.jpg';
-    cb(null, `evidence-${Date.now()}-${crypto.randomBytes(8).toString('hex')}${cleanExt}`);
+    const prefix = file.fieldname === 'completionPhoto'
+      ? 'completion'
+      : file.fieldname === 'disputePhoto'
+      ? 'dispute'
+      : 'evidence';
+    cb(null, `${prefix}-${Date.now()}-${crypto.randomBytes(8).toString('hex')}${cleanExt}`);
   }
 });
 
@@ -57,6 +76,42 @@ const upload = multer({
     }
   }
 });
+
+// Robust path containment helper that defends against path traversal and sibling directory attacks
+const isPathInsideDirectory = (baseDir, targetPath) => {
+  if (!baseDir || !targetPath) return false;
+  const resolvedBase = path.resolve(baseDir);
+  const resolvedTarget = path.resolve(targetPath);
+  const relative = path.relative(resolvedBase, resolvedTarget);
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+};
+
+// Safe disk cleanup helper for newly uploaded multipart files on request rejection/failure
+const cleanupUploadedFiles = (req) => {
+  const filePaths = [];
+  if (req.file && req.file.path) filePaths.push(req.file.path);
+  if (req.files) {
+    if (Array.isArray(req.files)) {
+      req.files.forEach((f) => f && f.path && filePaths.push(f.path));
+    } else if (typeof req.files === 'object') {
+      Object.values(req.files).forEach((arr) => {
+        if (Array.isArray(arr)) {
+          arr.forEach((f) => f && f.path && filePaths.push(f.path));
+        }
+      });
+    }
+  }
+  const uniquePaths = [...new Set(filePaths)];
+  for (const fp of uniquePaths) {
+    if (fs.existsSync(fp)) {
+      try {
+        fs.unlinkSync(fp);
+      } catch (err) {
+        console.error(`Failed to clean up temporary upload file ${fp}:`, err.message);
+      }
+    }
+  }
+};
 
 const uploadEvidence = upload.fields([
   { name: 'evidence', maxCount: 1 },
@@ -87,6 +142,80 @@ const handleUpload = (req, res, next) => {
     if (req.files) {
       if (req.files.evidence && req.files.evidence[0]) {
         req.file = req.files.evidence[0];
+      } else if (req.files.photo && req.files.photo[0]) {
+        req.file = req.files.photo[0];
+      }
+    }
+    next();
+  });
+};
+
+const uploadCompletionPhoto = upload.fields([
+  { name: 'completionPhoto', maxCount: 1 },
+  { name: 'photo', maxCount: 1 }
+]);
+
+const handleCompletionUpload = (req, res, next) => {
+  uploadCompletionPhoto(req, res, (err) => {
+    if (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({
+            error: 'Bad Request',
+            message: 'Uploaded completion photograph exceeds the maximum permitted size of 10MB.'
+          });
+        }
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: `Upload error: ${err.message}`
+        });
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: err.message || 'File upload error.'
+      });
+    }
+
+    if (req.files) {
+      if (req.files.completionPhoto && req.files.completionPhoto[0]) {
+        req.file = req.files.completionPhoto[0];
+      } else if (req.files.photo && req.files.photo[0]) {
+        req.file = req.files.photo[0];
+      }
+    }
+    next();
+  });
+};
+
+const uploadDisputePhoto = upload.fields([
+  { name: 'disputePhoto', maxCount: 1 },
+  { name: 'photo', maxCount: 1 }
+]);
+
+const handleDisputeUpload = (req, res, next) => {
+  uploadDisputePhoto(req, res, (err) => {
+    if (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({
+            error: 'Bad Request',
+            message: 'Uploaded dispute photograph exceeds the maximum permitted size of 10MB.'
+          });
+        }
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: `Upload error: ${err.message}`
+        });
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: err.message || 'File upload error.'
+      });
+    }
+
+    if (req.files) {
+      if (req.files.disputePhoto && req.files.disputePhoto[0]) {
+        req.file = req.files.disputePhoto[0];
       } else if (req.files.photo && req.files.photo[0]) {
         req.file = req.files.photo[0];
       }
@@ -341,6 +470,16 @@ router.post('/', handleUpload, async (req, res, next) => {
     const trackingId = await Complaint.generateTrackingId();
 
     // 10. Build and save Complaint
+    const assignedPriority = (req.body.priority && ['Low', 'Medium', 'High', 'Urgent'].includes(req.body.priority))
+      ? req.body.priority
+      : 'Medium';
+
+    const slaDeadlines = calculateSlaDeadlines({
+      category: validatedCategory,
+      priority: assignedPriority,
+      createdAt: new Date()
+    });
+
     const complaint = new Complaint({
       trackingId,
       title: trimmedTitle,
@@ -381,7 +520,20 @@ router.post('/', handleUpload, async (req, res, next) => {
         verificationStatus: statusVerdict,
         verificationReason: reasonVerdict
       },
-      priority: 'Medium',
+      priority: assignedPriority,
+      sla: {
+        policyVersion: slaDeadlines.policyVersion,
+        startedAt: slaDeadlines.startedAt,
+        acknowledgementDeadline: slaDeadlines.acknowledgementDeadline,
+        assignmentDeadline: slaDeadlines.assignmentDeadline,
+        resolutionDeadline: slaDeadlines.resolutionDeadline,
+        isBreached: false,
+        breachedStages: [],
+        escalationLevel: 0,
+        escalationHistory: [],
+        warningNotifiedStages: [],
+        breachNotifiedStages: []
+      },
       status: 'Submitted',
       citizen: req.user._id,
       statusHistory: [
@@ -443,6 +595,40 @@ router.get('/my', async (req, res, next) => {
       query.category = req.query.category;
     }
 
+    // Optional SLA breach filter
+    if (req.query.slaBreached === 'true') {
+      query['sla.isBreached'] = true;
+    }
+
+    // Optional escalation level filter
+    if (req.query.escalationLevel !== undefined && ['0', '1', '2', '3'].includes(String(req.query.escalationLevel))) {
+      query['sla.escalationLevel'] = parseInt(req.query.escalationLevel, 10);
+    }
+
+    // Critical Attention Filter: 'unacknowledged', 'acknowledged', or boolean
+    if (req.query.criticalAttention === 'unacknowledged' || req.query.criticalAttention === 'true') {
+      query['sla.requiresCriticalAttention'] = true;
+    } else if (req.query.criticalAttention === 'acknowledged') {
+      query['sla.criticalAttentionAcknowledgedAt'] = { $ne: null };
+    }
+
+    // Optional SLA breach filter
+    if (req.query.slaBreached === 'true') {
+      query['sla.isBreached'] = true;
+    }
+
+    // Optional escalation level filter
+    if (req.query.escalationLevel !== undefined && ['0', '1', '2', '3'].includes(String(req.query.escalationLevel))) {
+      query['sla.escalationLevel'] = parseInt(req.query.escalationLevel, 10);
+    }
+
+    // Critical Attention Filter: 'unacknowledged', 'acknowledged', or boolean
+    if (req.query.criticalAttention === 'unacknowledged' || req.query.criticalAttention === 'true') {
+      query['sla.requiresCriticalAttention'] = true;
+    } else if (req.query.criticalAttention === 'acknowledged') {
+      query['sla.criticalAttentionAcknowledgedAt'] = { $ne: null };
+    }
+
     // Optional search term on trackingId or title (sanitized against regex injection)
     if (req.query.search && typeof req.query.search === 'string' && req.query.search.trim()) {
       const sanitizedSearch = req.query.search.trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
@@ -481,11 +667,13 @@ router.get('/summary', async (req, res, next) => {
     const citizenId = req.user._id;
 
     // Calculate database counts for the citizen
-    const [total, submitted, underReview, inProgress, resolved, rejected] = await Promise.all([
+    const [total, submitted, underReview, inProgress, provisionallyResolved, disputed, resolved, rejected] = await Promise.all([
       Complaint.countDocuments({ citizen: citizenId }),
       Complaint.countDocuments({ citizen: citizenId, status: 'Submitted' }),
       Complaint.countDocuments({ citizen: citizenId, status: 'Under Review' }),
       Complaint.countDocuments({ citizen: citizenId, status: 'In Progress' }),
+      Complaint.countDocuments({ citizen: citizenId, status: 'Provisionally Resolved' }),
+      Complaint.countDocuments({ citizen: citizenId, status: 'Disputed' }),
       Complaint.countDocuments({ citizen: citizenId, status: 'Resolved' }),
       Complaint.countDocuments({ citizen: citizenId, status: 'Rejected' })
     ]);
@@ -496,6 +684,8 @@ router.get('/summary', async (req, res, next) => {
         submitted,
         underReview,
         inProgress,
+        provisionallyResolved,
+        disputed,
         resolved,
         rejected
       }
@@ -531,6 +721,40 @@ router.get('/assigned', authorize('officer'), async (req, res, next) => {
       query.category = req.query.category;
     }
 
+    // Optional SLA breach filter
+    if (req.query.slaBreached === 'true') {
+      query['sla.isBreached'] = true;
+    }
+
+    // Optional escalation level filter
+    if (req.query.escalationLevel !== undefined && ['0', '1', '2', '3'].includes(String(req.query.escalationLevel))) {
+      query['sla.escalationLevel'] = parseInt(req.query.escalationLevel, 10);
+    }
+
+    // Critical Attention Filter: 'unacknowledged', 'acknowledged', or boolean
+    if (req.query.criticalAttention === 'unacknowledged' || req.query.criticalAttention === 'true') {
+      query['sla.requiresCriticalAttention'] = true;
+    } else if (req.query.criticalAttention === 'acknowledged') {
+      query['sla.criticalAttentionAcknowledgedAt'] = { $ne: null };
+    }
+
+    // Optional SLA breach filter
+    if (req.query.slaBreached === 'true') {
+      query['sla.isBreached'] = true;
+    }
+
+    // Optional escalation level filter
+    if (req.query.escalationLevel !== undefined && ['0', '1', '2', '3'].includes(String(req.query.escalationLevel))) {
+      query['sla.escalationLevel'] = parseInt(req.query.escalationLevel, 10);
+    }
+
+    // Critical Attention Filter: 'unacknowledged', 'acknowledged', or boolean
+    if (req.query.criticalAttention === 'unacknowledged' || req.query.criticalAttention === 'true') {
+      query['sla.requiresCriticalAttention'] = true;
+    } else if (req.query.criticalAttention === 'acknowledged') {
+      query['sla.criticalAttentionAcknowledgedAt'] = { $ne: null };
+    }
+
     // Optional search term on trackingId or title (sanitized against regex injection)
     if (req.query.search && typeof req.query.search === 'string' && req.query.search.trim()) {
       const sanitizedSearch = req.query.search.trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
@@ -547,7 +771,7 @@ router.get('/assigned', authorize('officer'), async (req, res, next) => {
 
     return res.status(200).json({
       complaints: complaints.map((c) => ({
-        ...c.toSafeObject(),
+        ...c.toSafeObject(req.user),
         citizenName: c.citizen?.name || 'Citizen'
       })),
       pagination: {
@@ -571,11 +795,13 @@ router.get('/assigned/summary', authorize('officer'), async (req, res, next) => 
   try {
     const officerId = req.user._id;
 
-    const [totalAssigned, submitted, underReview, inProgress, resolved, rejected] = await Promise.all([
+    const [totalAssigned, submitted, underReview, inProgress, provisionallyResolved, disputed, resolved, rejected] = await Promise.all([
       Complaint.countDocuments({ assignedOfficer: officerId }),
       Complaint.countDocuments({ assignedOfficer: officerId, status: 'Submitted' }),
       Complaint.countDocuments({ assignedOfficer: officerId, status: 'Under Review' }),
       Complaint.countDocuments({ assignedOfficer: officerId, status: 'In Progress' }),
+      Complaint.countDocuments({ assignedOfficer: officerId, status: 'Provisionally Resolved' }),
+      Complaint.countDocuments({ assignedOfficer: officerId, status: 'Disputed' }),
       Complaint.countDocuments({ assignedOfficer: officerId, status: 'Resolved' }),
       Complaint.countDocuments({ assignedOfficer: officerId, status: 'Rejected' })
     ]);
@@ -586,6 +812,8 @@ router.get('/assigned/summary', authorize('officer'), async (req, res, next) => 
         submitted,
         underReview,
         inProgress,
+        provisionallyResolved,
+        disputed,
         resolved,
         rejected
       }
@@ -722,6 +950,8 @@ router.get('/admin/summary', authorize('admin'), async (req, res, next) => {
       'Submitted': 0,
       'Under Review': 0,
       'In Progress': 0,
+      'Provisionally Resolved': 0,
+      'Disputed': 0,
       'Resolved': 0,
       'Rejected': 0
     };
@@ -774,7 +1004,7 @@ router.get('/admin/summary', authorize('admin'), async (req, res, next) => {
         assigned,
         resolved: byStatus['Resolved'],
         rejected: byStatus['Rejected'],
-        activeIssues: byStatus['Submitted'] + byStatus['Under Review'] + byStatus['In Progress'],
+        activeIssues: byStatus['Submitted'] + byStatus['Under Review'] + byStatus['In Progress'] + byStatus['Provisionally Resolved'] + byStatus['Disputed'],
         byCategory,
         byDepartment,
         performance: {
@@ -898,6 +1128,23 @@ router.get('/admin/all', authorize('admin'), async (req, res, next) => {
       query.category = req.query.category;
     }
 
+    // Optional SLA breach filter
+    if (req.query.slaBreached === 'true') {
+      query['sla.isBreached'] = true;
+    }
+
+    // Optional escalation level filter
+    if (req.query.escalationLevel !== undefined && ['0', '1', '2', '3'].includes(String(req.query.escalationLevel))) {
+      query['sla.escalationLevel'] = parseInt(req.query.escalationLevel, 10);
+    }
+
+    // Critical Attention Filter: 'unacknowledged', 'acknowledged', or boolean
+    if (req.query.criticalAttention === 'unacknowledged' || req.query.criticalAttention === 'true') {
+      query['sla.requiresCriticalAttention'] = true;
+    } else if (req.query.criticalAttention === 'acknowledged') {
+      query['sla.criticalAttentionAcknowledgedAt'] = { $ne: null };
+    }
+
     const total = await Complaint.countDocuments(query);
     const complaints = await Complaint.find(query)
       .populate('citizen', 'name email')
@@ -908,7 +1155,7 @@ router.get('/admin/all', authorize('admin'), async (req, res, next) => {
 
     return res.status(200).json({
       complaints: complaints.map((c) => ({
-        ...c.toSafeObject(),
+        ...c.toSafeObject(req.user),
         citizenName: c.citizen?.name || 'Citizen',
         officerName: c.assignedOfficer?.name || null,
         officerEmail: c.assignedOfficer?.email || null
@@ -1204,12 +1451,14 @@ router.get('/track/:trackingId', async (req, res, next) => {
 
     // Query condition based on authenticated role
     const query = { trackingId: normalizedTrackingId };
-    if (req.user.role === 'citizen') {
-      query.citizen = req.user._id;
-    } else if (req.user.role === 'officer') {
-      query.assignedOfficer = req.user._id;
+    if (req.user) {
+      if (req.user.role === 'citizen') {
+        query.citizen = req.user._id;
+      } else if (req.user.role === 'officer') {
+        query.assignedOfficer = req.user._id;
+      }
+      // Admin has unrestricted read access
     }
-    // Admin has unrestricted read access
 
     const complaint = await Complaint.findOne(query)
       .populate('citizen', 'name email')
@@ -1223,7 +1472,7 @@ router.get('/track/:trackingId', async (req, res, next) => {
     }
 
     return res.status(200).json({
-      complaint: complaint.toSafeObject()
+      complaint: complaint.toSafeObject(req.user)
     });
   } catch (error) {
     next(error);
@@ -1276,7 +1525,7 @@ router.get('/:id', async (req, res, next) => {
     // Admin is authorized to view all
 
     return res.status(200).json({
-      complaint: complaint.toSafeObject()
+      complaint: complaint.toSafeObject(req.user)
     });
   } catch (error) {
     next(error);
@@ -1326,9 +1575,25 @@ router.get('/:id/evidence', async (req, res, next) => {
     }
 
     const resolvedUploadDir = path.resolve(UPLOAD_DIR);
-    const safeKey = path.basename(complaint.evidence.storageKey);
+    const rawKey = complaint.evidence.storageKey;
+    if (!rawKey || typeof rawKey !== 'string') {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'No evidence photograph on record for this complaint.'
+      });
+    }
+
+    const candidatePath = path.resolve(resolvedUploadDir, rawKey);
+    if (!isPathInsideDirectory(resolvedUploadDir, candidatePath)) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Access denied. Evidence path outside designated evidence directory.'
+      });
+    }
+
+    const safeKey = path.basename(rawKey);
     const filePath = path.resolve(resolvedUploadDir, safeKey);
-    if (!filePath.startsWith(resolvedUploadDir) || !fs.existsSync(filePath)) {
+    if (!isPathInsideDirectory(resolvedUploadDir, filePath) || !fs.existsSync(filePath)) {
       return res.status(404).json({
         error: 'Not Found',
         message: 'Evidence photograph file is missing from server storage.'
@@ -1339,6 +1604,1079 @@ router.get('/:id/evidence', async (req, res, next) => {
     res.setHeader('Content-Disposition', `inline; filename="${complaint.evidence.storageKey}"`);
     res.setHeader('Cache-Control', 'private, max-age=3600');
     return res.sendFile(filePath);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/complaints/:id/completion-evidence
+ * @desc    Stream the authenticated completion photograph evidence
+ * @access  Protected (Owner Citizen, Assigned Officer, or Admin)
+ */
+router.get('/:id/completion-evidence', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const complaint = mongoose.Types.ObjectId.isValid(id)
+      ? await Complaint.findById(id)
+      : await Complaint.findOne({ trackingId: id.trim().toUpperCase() });
+
+    if (!complaint) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Complaint not found.'
+      });
+    }
+
+    if (!complaint.completionEvidence || !complaint.completionEvidence.storageKey) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'No completion evidence photograph on record for this complaint.'
+      });
+    }
+
+    // Role-based authorization: Owner Citizen, Assigned Officer, or Admin
+    const isAdmin = req.user.role === 'admin';
+    const isOwner = complaint.citizen && complaint.citizen.equals(req.user._id);
+    const isAssignedOfficer =
+      req.user.role === 'officer' &&
+      complaint.assignedOfficer &&
+      complaint.assignedOfficer.equals(req.user._id);
+
+    if (!isAdmin && !isOwner && !isAssignedOfficer) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Access denied. You are not authorized to view completion evidence for this complaint.'
+      });
+    }
+
+    const resolvedUploadDir = path.resolve(UPLOAD_DIR);
+    const rawKey = complaint.completionEvidence.storageKey;
+    if (!rawKey || typeof rawKey !== 'string') {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'No completion evidence photograph on record for this complaint.'
+      });
+    }
+
+    const candidatePath = path.resolve(resolvedUploadDir, rawKey);
+    if (!isPathInsideDirectory(resolvedUploadDir, candidatePath)) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Access denied. Completion evidence path outside designated evidence directory.'
+      });
+    }
+
+    const safeKey = path.basename(rawKey);
+    const filePath = path.resolve(resolvedUploadDir, safeKey);
+    if (!isPathInsideDirectory(resolvedUploadDir, filePath) || !fs.existsSync(filePath)) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Completion evidence photograph file is missing from server storage.'
+      });
+    }
+
+    res.setHeader('Content-Type', complaint.completionEvidence.mimetype || complaint.completionEvidence.mimeType || 'image/jpeg');
+    res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    return res.sendFile(filePath);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/complaints/:id/dispute-evidence
+ * @desc    Stream the authenticated dispute photograph evidence
+ * @access  Protected (Owner Citizen, Assigned Officer, or Admin)
+ */
+router.get('/:id/dispute-evidence', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const complaint = mongoose.Types.ObjectId.isValid(id)
+      ? await Complaint.findById(id)
+      : await Complaint.findOne({ trackingId: id.trim().toUpperCase() });
+
+    if (!complaint) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Complaint not found.'
+      });
+    }
+
+    if (!complaint.resolutionDispute || !complaint.resolutionDispute.photo || !complaint.resolutionDispute.photo.storageKey) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'No dispute evidence photograph on record for this complaint.'
+      });
+    }
+
+    // Role-based authorization: Owner Citizen, Assigned Officer, or Admin
+    const isAdmin = req.user.role === 'admin';
+    const isOwner = complaint.citizen && complaint.citizen.equals(req.user._id);
+    const isAssignedOfficer =
+      req.user.role === 'officer' &&
+      complaint.assignedOfficer &&
+      complaint.assignedOfficer.equals(req.user._id);
+
+    if (!isAdmin && !isOwner && !isAssignedOfficer) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Access denied. You are not authorized to view dispute evidence for this complaint.'
+      });
+    }
+
+    const resolvedUploadDir = path.resolve(UPLOAD_DIR);
+    const rawKey = complaint.resolutionDispute.photo.storageKey;
+    if (!rawKey || typeof rawKey !== 'string') {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'No dispute evidence photograph on record for this complaint.'
+      });
+    }
+
+    const candidatePath = path.resolve(resolvedUploadDir, rawKey);
+    if (!isPathInsideDirectory(resolvedUploadDir, candidatePath)) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Access denied. Dispute evidence path outside designated evidence directory.'
+      });
+    }
+
+    const safeKey = path.basename(rawKey);
+    const filePath = path.resolve(resolvedUploadDir, safeKey);
+    if (!isPathInsideDirectory(resolvedUploadDir, filePath) || !fs.existsSync(filePath)) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Dispute evidence photograph file is missing from server storage.'
+      });
+    }
+
+    res.setHeader('Content-Type', complaint.resolutionDispute.photo.mimeType || 'image/jpeg');
+    res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    return res.sendFile(filePath);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   POST /api/complaints/:id/complete-work
+ * @desc    Submit geo-verified work completion evidence by assigned officer
+ * @access  Protected (Assigned Officer only)
+ */
+router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, async (req, res, next) => {
+  let uploadedFilePath = req.file ? req.file.path : null;
+
+  try {
+    const { id } = req.params;
+
+    // 1. Complaint Lookup
+    const complaint = mongoose.Types.ObjectId.isValid(id)
+      ? await Complaint.findById(id)
+      : await Complaint.findOne({ trackingId: id.trim().toUpperCase() });
+
+    if (!complaint) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Complaint not found.'
+      });
+    }
+
+    // 2. Assignment Authorization Check
+    if (!complaint.assignedOfficer || !complaint.assignedOfficer.equals(req.user._id)) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Access denied. You are not assigned to this complaint.'
+      });
+    }
+
+    // 3. Status Check: must be 'In Progress'
+    if (complaint.status !== 'In Progress') {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: `Cannot submit completion evidence. Complaint status must be 'In Progress' (current status: '${complaint.status}').`
+      });
+    }
+
+    // 4. Validate Resolution Notes (10 - 2000 characters)
+    const { resolutionNotes, latitude, longitude, accuracy, capturedAt, completionPhotoBase64, photoBase64 } = req.body;
+
+    if (!resolutionNotes || typeof resolutionNotes !== 'string' || resolutionNotes.trim().length < 10) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Resolution notes are required and must be at least 10 characters long.'
+      });
+    }
+
+    if (resolutionNotes.trim().length > 2000) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Resolution notes cannot exceed 2000 characters.'
+      });
+    }
+
+    // 5. Validate Device Coordinates
+    if (latitude === undefined || latitude === null || latitude === '' || isNaN(Number(latitude))) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Valid GPS latitude between -90 and 90 is required.'
+      });
+    }
+    const latNum = Number(latitude);
+    if (latNum < -90 || latNum > 90) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'GPS latitude must be between -90 and 90 degrees.'
+      });
+    }
+
+    if (longitude === undefined || longitude === null || longitude === '' || isNaN(Number(longitude))) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Valid GPS longitude between -180 and 180 is required.'
+      });
+    }
+    const lngNum = Number(longitude);
+    if (lngNum < -180 || lngNum > 180) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'GPS longitude must be between -180 and 180 degrees.'
+      });
+    }
+
+    // 6. Validate Accuracy (finite, positive, <= 100 meters)
+    if (accuracy === undefined || accuracy === null || accuracy === '' || isNaN(Number(accuracy))) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Valid GPS accuracy in metres is required.'
+      });
+    }
+    const accNum = Number(accuracy);
+    if (!isFinite(accNum) || accNum <= 0) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'GPS accuracy must be a positive finite number.'
+      });
+    }
+    if (accNum > 100) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: `GPS accuracy is insufficient (${accNum}m). Accuracy of 100 metres or better is required.`
+      });
+    }
+
+    // 7. Validate Capture Timestamp (valid, not >60s future, not >24h old)
+    if (!capturedAt) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Capture timestamp (capturedAt) is required.'
+      });
+    }
+    const captureDate = new Date(capturedAt);
+    const timeVal = captureDate.getTime();
+    if (isNaN(timeVal)) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Capture timestamp (capturedAt) is invalid or malformed.'
+      });
+    }
+    const now = Date.now();
+    if (timeVal > now + 60 * 1000) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Capture timestamp cannot be in the future (exceeds permitted clock skew of 60 seconds).'
+      });
+    }
+    if (timeVal < now - 24 * 60 * 60 * 1000) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Capture timestamp cannot be older than 24 hours.'
+      });
+    }
+
+    // 8. Validate Mandatory Completion Photograph
+    // Reject Base64 uploads on work completion endpoint (enforce multipart-only contract)
+    if (
+      completionPhotoBase64 ||
+      photoBase64 ||
+      (typeof req.body.completionPhoto === 'string' && req.body.completionPhoto.startsWith('data:image/')) ||
+      (typeof req.body.photo === 'string' && req.body.photo.startsWith('data:image/'))
+    ) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: "Base64 photograph submissions are not permitted for work completion. A mandatory multipart 'completionPhoto' file must be uploaded."
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: "Completion photograph is required. Please capture or upload a multipart image file using field name 'completionPhoto'."
+      });
+    }
+
+    let fileBuffer = fs.readFileSync(req.file.path);
+    let storageFilename = req.file.filename;
+    let originalName = req.file.originalname;
+    let fileMime = req.file.mimetype;
+    let fileSize = req.file.size;
+
+    // Check size <= 10MB
+    if (fileSize > 10 * 1024 * 1024) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Uploaded completion photograph exceeds the maximum permitted size of 10MB.'
+      });
+    }
+
+    // Check magic bytes
+    const detectedMime = validateImageMagicBytes(fileBuffer);
+    if (!detectedMime) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Uploaded file is not a valid image format (genuine JPEG, PNG, or WebP required).'
+      });
+    }
+
+    // 9. Duplicate Image Content Check (SHA-256)
+    const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+    if (complaint.evidence?.storageKey) {
+      const origSafeKey = path.basename(complaint.evidence.storageKey);
+      const origPath = path.resolve(UPLOAD_DIR, origSafeKey);
+      if (fs.existsSync(origPath)) {
+        try {
+          const origBuffer = fs.readFileSync(origPath);
+          const origHash = crypto.createHash('sha256').update(origBuffer).digest('hex');
+          if (origHash === fileHash) {
+            if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+              try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+            }
+            return res.status(400).json({
+              error: 'Bad Request',
+              message: 'Completion photograph matches the original complaint photograph. A genuine photo of completed work is required.'
+            });
+          }
+        } catch (e) {
+          // non-blocking
+        }
+      }
+    }
+
+    // 10. Check Original Complaint GPS Coordinates
+    const origLat = complaint.location?.latitude;
+    const origLng = complaint.location?.longitude;
+    const hasOrigCoords =
+      origLat !== null &&
+      origLat !== undefined &&
+      typeof origLat === 'number' &&
+      !isNaN(origLat) &&
+      origLng !== null &&
+      origLng !== undefined &&
+      typeof origLng === 'number' &&
+      !isNaN(origLng);
+
+    if (!hasOrigCoords) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Original complaint does not contain valid GPS coordinates. Distance verification cannot be performed.'
+      });
+    }
+
+    // 11. Distance Verification
+    const toleranceMeters = process.env.COMPLETION_GPS_TOLERANCE_METERS
+      ? parseInt(process.env.COMPLETION_GPS_TOLERANCE_METERS, 10)
+      : 200;
+
+    const distanceMeters = calculateDistanceMeters(Number(origLat), Number(origLng), latNum, lngNum);
+    if (distanceMeters === null || distanceMeters > toleranceMeters) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: `Completion location is ${distanceMeters}m away from the original complaint location, which exceeds the permitted tolerance of ${toleranceMeters}m.`
+      });
+    }
+
+    // 12. EXIF GPS Extraction & Analysis
+    const exif = extractExifGps(fileBuffer);
+    let exifComparisonStatus = 'no_metadata';
+    let verificationStatus = 'verified';
+    let verificationReason = `Device GPS verified within ${distanceMeters}m of original complaint location (tolerance: ${toleranceMeters}m, GPS accuracy: ${accNum}m).`;
+
+    let exifMetadata = {
+      hasGps: false,
+      gpsLatitude: null,
+      gpsLongitude: null,
+      matchResult: 'unavailable',
+      distanceMeters: null,
+      notes: 'No embedded EXIF GPS metadata found in uploaded image; relying on device GPS.'
+    };
+
+    if (exif.hasGps && exif.gpsLatitude !== null && exif.gpsLongitude !== null) {
+      exifMetadata.hasGps = true;
+      exifMetadata.gpsLatitude = exif.gpsLatitude;
+      exifMetadata.gpsLongitude = exif.gpsLongitude;
+
+      const exifDistToDevice = calculateDistanceMeters(latNum, lngNum, exif.gpsLatitude, exif.gpsLongitude);
+      exifMetadata.distanceMeters = exifDistToDevice;
+
+      if (exifDistToDevice !== null && exifDistToDevice > 150) {
+        exifComparisonStatus = 'location_mismatch';
+        verificationStatus = 'warning';
+        exifMetadata.matchResult = 'mismatched';
+        exifMetadata.notes = `EXIF GPS coordinates differ by ${exifDistToDevice}m from submitted device GPS (threshold: 150m).`;
+        verificationReason = `Telemetry warning: EXIF GPS coordinates differ by ${exifDistToDevice}m from submitted device GPS. Evidence recorded with verification warning.`;
+      } else {
+        exifComparisonStatus = 'verified';
+        verificationStatus = 'verified';
+        exifMetadata.matchResult = 'matched';
+        exifMetadata.notes = `EXIF GPS matched device GPS (within ${exifDistToDevice || 0}m).`;
+        verificationReason += ` EXIF GPS matched device GPS (within ${exifDistToDevice || 0}m).`;
+      }
+    }
+
+    // 13. Construct Completion Evidence Object
+    const completionEvidenceData = {
+      imageUrl: `/api/complaints/${complaint._id}/completion-evidence`,
+      storageKey: storageFilename,
+      originalFilename: originalName,
+      originalName: originalName,
+      mimetype: detectedMime,
+      mimeType: detectedMime,
+      size: fileSize,
+      sizeBytes: fileSize,
+      capturedAt: captureDate,
+      submittedAt: new Date(),
+      coordinates: {
+        latitude: latNum,
+        longitude: lngNum,
+        accuracy: accNum,
+        accuracyMeters: accNum
+      },
+      locationSource: exif.hasGps ? 'exif' : 'device_gps',
+      resolutionNotes: resolutionNotes.trim(),
+      exifMetadata: exifMetadata,
+      exifComparisonStatus: exifComparisonStatus,
+      distanceMeters: distanceMeters,
+      verificationStatus: verificationStatus,
+      verificationReason: verificationReason
+    };
+
+    // 14. Atomic State Transition (prevent concurrent double-completions)
+    const updatedComplaint = await Complaint.findOneAndUpdate(
+      {
+        _id: complaint._id,
+        status: 'In Progress'
+      },
+      {
+        $set: {
+          status: 'Provisionally Resolved',
+          completionEvidence: completionEvidenceData,
+          resolutionNotes: resolutionNotes.trim(),
+          'sla.provisionallyResolvedAt': new Date()
+        },
+        $push: {
+          statusHistory: {
+            status: 'Provisionally Resolved',
+            timestamp: new Date(),
+            comment: `Work completed by officer. Geo-verified within ${distanceMeters}m (tolerance: ${toleranceMeters}m). Notes: ${resolutionNotes.trim().slice(0, 150)}`,
+            actor: req.user._id,
+            actorRole: 'officer'
+          }
+        }
+      },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedComplaint) {
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      }
+      return res.status(409).json({
+        error: 'Conflict',
+        message: 'Complaint is no longer in progress or was concurrently updated by another process.'
+      });
+    }
+
+    // 15. Send Notification to Citizen
+    await sendNotification({
+      recipient: updatedComplaint.citizen,
+      actor: req.user._id,
+      actorRole: 'officer',
+      complaint: updatedComplaint._id,
+      trackingId: updatedComplaint.trackingId,
+      type: 'work_completed',
+      title: 'Work Completed on Your Complaint',
+      message: `Officer ${req.user.name} has submitted completion evidence for "${updatedComplaint.title}". Please review and confirm the resolution.`
+    });
+
+    return res.status(200).json({
+      message: 'Work completion evidence submitted successfully. Complaint is now provisionally resolved.',
+      complaint: updatedComplaint.toSafeObject(req.user)
+    });
+  } catch (error) {
+    cleanupUploadedFiles(req);
+    next(error);
+  }
+});
+
+/**
+ * @route   PATCH /api/complaints/:id/confirm-resolution
+ * @desc    Citizen confirms satisfactory work completion, transitioning status to final 'Resolved'
+ * @access  Protected (Complaint Owner Citizen only)
+ */
+router.patch('/:id/confirm-resolution', authorize('citizen'), async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const complaint = mongoose.Types.ObjectId.isValid(id)
+      ? await Complaint.findById(id)
+      : await Complaint.findOne({ trackingId: id.trim().toUpperCase() });
+
+    if (!complaint) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Complaint not found.'
+      });
+    }
+
+    // Role & Ownership Authorization Guard
+    if (!complaint.citizen || !complaint.citizen.equals(req.user._id)) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Access denied. You are only authorized to confirm resolution for complaints filed by your account.'
+      });
+    }
+
+    // Lifecycle Status Precondition Guard
+    if (complaint.status !== 'Provisionally Resolved') {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: `Cannot confirm resolution. Complaint is currently in '${complaint.status}' status (must be 'Provisionally Resolved').`
+      });
+    }
+
+    const now = new Date();
+    const resDeadline = complaint.sla?.resolutionDeadline ? new Date(complaint.sla.resolutionDeadline) : null;
+    const isWithinSla = resDeadline ? (now <= resDeadline) : true;
+    const startMs = complaint.sla?.startedAt ? new Date(complaint.sla.startedAt).getTime() : new Date(complaint.createdAt).getTime();
+    const durationMs = now.getTime() - startMs;
+
+    // Atomic Status Transition
+    const updatedComplaint = await Complaint.findOneAndUpdate(
+      {
+        _id: complaint._id,
+        status: 'Provisionally Resolved'
+      },
+      {
+        $set: {
+          status: 'Resolved',
+          resolvedAt: now,
+          'sla.isResolvedWithinSla': isWithinSla,
+          'sla.totalResolutionDurationMs': durationMs
+        },
+        $push: {
+          statusHistory: {
+            status: 'Resolved',
+            timestamp: new Date(),
+            comment: 'Citizen confirmed satisfactory resolution of civic work.',
+            actor: req.user._id,
+            actorRole: 'citizen'
+          }
+        }
+      },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedComplaint) {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: 'Complaint is no longer in provisionally resolved status or was concurrently modified by another process.'
+      });
+    }
+
+    // Send In-App Notifications
+    if (updatedComplaint.assignedOfficer) {
+      await sendNotification({
+        recipient: updatedComplaint.assignedOfficer,
+        actor: req.user._id,
+        actorRole: 'citizen',
+        complaint: updatedComplaint._id,
+        trackingId: updatedComplaint.trackingId,
+        type: 'resolution_confirmed',
+        title: 'Resolution Confirmed by Citizen',
+        message: `Citizen ${req.user.name} has confirmed the satisfactory resolution of complaint "${updatedComplaint.title}" (${updatedComplaint.trackingId}).`
+      });
+    }
+
+    await sendNotification({
+      recipient: updatedComplaint.citizen,
+      actor: req.user._id,
+      actorRole: 'citizen',
+      complaint: updatedComplaint._id,
+      trackingId: updatedComplaint.trackingId,
+      type: 'complaint_resolved',
+      title: 'Complaint Resolved',
+      message: `You have confirmed satisfactory resolution for complaint "${updatedComplaint.title}" (${updatedComplaint.trackingId}). Thank you for helping keep our city clean and safe!`
+    });
+
+    return res.status(200).json({
+      message: 'Complaint resolution confirmed successfully. Complaint is now resolved.',
+      complaint: updatedComplaint.toSafeObject(req.user)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   POST /api/complaints/:id/dispute
+ * @desc    Citizen disputes provisional resolution with mandatory reason and optional photographic evidence
+ * @access  Protected (Complaint Owner Citizen only)
+ */
+router.post('/:id/dispute', authorize('citizen'), handleDisputeUpload, async (req, res, next) => {
+  let uploadedFilePath = req.file ? req.file.path : null;
+
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const complaint = mongoose.Types.ObjectId.isValid(id)
+      ? await Complaint.findById(id)
+      : await Complaint.findOne({ trackingId: id.trim().toUpperCase() });
+
+    if (!complaint) {
+      cleanupUploadedFiles(req);
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Complaint not found.'
+      });
+    }
+
+    // Role & Ownership Authorization Guard
+    if (!complaint.citizen || !complaint.citizen.equals(req.user._id)) {
+      cleanupUploadedFiles(req);
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Access denied. You are only authorized to dispute complaints filed by your account.'
+      });
+    }
+
+    // Lifecycle Status Precondition Guard
+    if (complaint.status !== 'Provisionally Resolved') {
+      cleanupUploadedFiles(req);
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: `Cannot dispute resolution. Complaint is currently in '${complaint.status}' status (must be 'Provisionally Resolved').`
+      });
+    }
+
+    // Reason Validation
+    if (!reason || typeof reason !== 'string' || reason.trim().length < 10) {
+      cleanupUploadedFiles(req);
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Dispute reason is required and must be at least 10 characters long.'
+      });
+    }
+
+    if (reason.trim().length > 1000) {
+      cleanupUploadedFiles(req);
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Dispute reason cannot exceed 1000 characters.'
+      });
+    }
+
+    // Optional Dispute Photograph Validation
+    let disputePhotoData = null;
+    if (req.file) {
+      const fileBuffer = fs.readFileSync(req.file.path);
+      const isValidFormat = validateImageMagicBytes(fileBuffer);
+      if (!isValidFormat) {
+        cleanupUploadedFiles(req);
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Uploaded dispute photograph must be a valid JPEG or PNG image format.'
+        });
+      }
+
+      const storageFilename = path.basename(req.file.path);
+      const originalName = req.file.originalname || 'dispute-evidence.jpg';
+      const detectedMime = req.file.mimetype || 'image/jpeg';
+      const fileSize = req.file.size;
+
+      disputePhotoData = {
+        imageUrl: `/api/complaints/${complaint._id}/dispute-evidence`,
+        storageKey: storageFilename,
+        originalName: originalName,
+        mimeType: detectedMime,
+        sizeBytes: fileSize,
+        submittedAt: new Date()
+      };
+    }
+
+    // Atomic Status Transition
+    const updatedComplaint = await Complaint.findOneAndUpdate(
+      {
+        _id: complaint._id,
+        status: 'Provisionally Resolved'
+      },
+      {
+        $set: {
+          status: 'Disputed',
+          'sla.disputedAt': new Date(),
+          resolutionDispute: {
+            reason: reason.trim(),
+            photo: disputePhotoData,
+            submittedAt: new Date(),
+            citizen: req.user._id,
+            status: 'pending_review',
+            adminDecision: null,
+            adminNotes: '',
+            reviewedAt: null,
+            reviewedBy: null
+          }
+        },
+        $push: {
+          statusHistory: {
+            status: 'Disputed',
+            timestamp: new Date(),
+            comment: `Resolution disputed by citizen: ${reason.trim().slice(0, 150)}`,
+            actor: req.user._id,
+            actorRole: 'citizen'
+          }
+        }
+      },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedComplaint) {
+      cleanupUploadedFiles(req);
+      return res.status(409).json({
+        error: 'Conflict',
+        message: 'Complaint is no longer in provisionally resolved status or was concurrently modified by another process.'
+      });
+    }
+
+    // Send In-App Notifications
+    if (updatedComplaint.assignedOfficer) {
+      await sendNotification({
+        recipient: updatedComplaint.assignedOfficer,
+        actor: req.user._id,
+        actorRole: 'citizen',
+        complaint: updatedComplaint._id,
+        trackingId: updatedComplaint.trackingId,
+        type: 'resolution_disputed',
+        title: 'Complaint Resolution Disputed',
+        message: `Citizen ${req.user.name} has disputed the completion of complaint "${updatedComplaint.title}" (${updatedComplaint.trackingId}). Reason: ${reason.trim()}`
+      });
+    }
+
+    const adminUser = await User.findOne({ role: 'admin' });
+    if (adminUser) {
+      await sendNotification({
+        recipient: adminUser._id,
+        actor: req.user._id,
+        actorRole: 'citizen',
+        complaint: updatedComplaint._id,
+        trackingId: updatedComplaint.trackingId,
+        type: 'resolution_disputed',
+        title: 'Dispute Filed — Review Required',
+        message: `Citizen ${req.user.name} has disputed completion on complaint "${updatedComplaint.title}" (${updatedComplaint.trackingId}). Reason: ${reason.trim()}`
+      });
+    }
+
+    return res.status(200).json({
+      message: 'Resolution dispute submitted successfully. Complaint is under administrative review.',
+      complaint: updatedComplaint.toSafeObject(req.user)
+    });
+  } catch (error) {
+    cleanupUploadedFiles(req);
+    next(error);
+  }
+});
+
+/**
+ * @route   PATCH /api/complaints/:id/admin-review
+ * @desc    Administrator reviews disputed complaint and decides: accept resolution or reopen work
+ * @access  Protected (Admin only)
+ */
+router.patch('/:id/admin-review', authorize('admin'), async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { action, reviewNotes } = req.body;
+
+    const complaint = mongoose.Types.ObjectId.isValid(id)
+      ? await Complaint.findById(id)
+      : await Complaint.findOne({ trackingId: id.trim().toUpperCase() });
+
+    if (!complaint) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Complaint not found.'
+      });
+    }
+
+    // Lifecycle Status Precondition Guard
+    if (complaint.status !== 'Disputed') {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: `Only complaints in 'Disputed' status can be reviewed by an administrator (current status: '${complaint.status}').`
+      });
+    }
+
+    const normalizedAction = (action || '').toLowerCase().trim();
+    const isAccept = normalizedAction === 'accept' || normalizedAction === 'confirm_resolution';
+    const isReopen = normalizedAction === 'reopen' || normalizedAction === 'return_in_progress';
+
+    if (!isAccept && !isReopen) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: "Invalid review action. Allowed actions are 'accept' (confirm resolution) or 'reopen' (return in progress)."
+      });
+    }
+
+    const trimmedNotes = typeof reviewNotes === 'string' ? reviewNotes.trim() : '';
+
+    if (isReopen) {
+      if (!trimmedNotes || trimmedNotes.length < 5) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Admin review reason is required when reopening a complaint for rework (minimum 5 characters).'
+        });
+      }
+      if (trimmedNotes.length > 1000) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Admin review notes cannot exceed 1000 characters.'
+        });
+      }
+    } else if (trimmedNotes.length > 1000) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Admin review notes cannot exceed 1000 characters.'
+      });
+    }
+
+    let updatedComplaint;
+
+    if (isAccept) {
+      const now = new Date();
+      const resDeadline = complaint.sla?.resolutionDeadline ? new Date(complaint.sla.resolutionDeadline) : null;
+      const isWithinSla = resDeadline ? (now <= resDeadline) : true;
+      const startMs = complaint.sla?.startedAt ? new Date(complaint.sla.startedAt).getTime() : new Date(complaint.createdAt).getTime();
+      const durationMs = now.getTime() - startMs;
+
+      // Admin Decision A: Accept Resolution -> final Resolved
+      updatedComplaint = await Complaint.findOneAndUpdate(
+        {
+          _id: complaint._id,
+          status: 'Disputed'
+        },
+        {
+          $set: {
+            status: 'Resolved',
+            resolvedAt: now,
+            'sla.isResolvedWithinSla': isWithinSla,
+            'sla.totalResolutionDurationMs': durationMs,
+            'resolutionDispute.status': 'resolved_by_admin',
+            'resolutionDispute.adminDecision': 'confirm_resolution',
+            'resolutionDispute.adminNotes': trimmedNotes || 'Resolution confirmed by administrator after dispute review.',
+            'resolutionDispute.reviewedAt': now,
+            'resolutionDispute.reviewedBy': req.user._id
+          },
+          $push: {
+            statusHistory: {
+              status: 'Resolved',
+              timestamp: new Date(),
+              comment: `Admin confirmed resolution after dispute review. Notes: ${trimmedNotes || 'Work confirmed satisfactory.'}`,
+              actor: req.user._id,
+              actorRole: 'admin'
+            }
+          }
+        },
+        { new: true, runValidators: true }
+      );
+
+      if (!updatedComplaint) {
+        return res.status(409).json({
+          error: 'Conflict',
+          message: 'Complaint is no longer in disputed status or was concurrently modified by another process.'
+        });
+      }
+
+      // Notify citizen and officer
+      await sendNotification({
+        recipient: updatedComplaint.citizen,
+        actor: req.user._id,
+        actorRole: 'admin',
+        complaint: updatedComplaint._id,
+        trackingId: updatedComplaint.trackingId,
+        type: 'resolution_admin_closed',
+        title: 'Dispute Review: Resolution Upheld',
+        message: `Administrator has reviewed the dispute on complaint "${updatedComplaint.title}" (${updatedComplaint.trackingId}) and confirmed the resolution. Notes: ${trimmedNotes || 'Resolution upheld.'}`
+      });
+
+      if (updatedComplaint.assignedOfficer) {
+        await sendNotification({
+          recipient: updatedComplaint.assignedOfficer,
+          actor: req.user._id,
+          actorRole: 'admin',
+          complaint: updatedComplaint._id,
+          trackingId: updatedComplaint.trackingId,
+          type: 'complaint_resolved',
+          title: 'Dispute Resolved by Admin',
+          message: `Administrator has reviewed the dispute and confirmed resolution for complaint "${updatedComplaint.title}" (${updatedComplaint.trackingId}).`
+        });
+      }
+
+      return res.status(200).json({
+        message: 'Dispute reviewed: Resolution upheld and complaint marked as resolved.',
+        complaint: updatedComplaint.toSafeObject(req.user)
+      });
+    } else {
+      // Admin Decision B: Reopen Work -> return to In Progress
+      const nextReworkCount = (complaint.reworkCount || 0) + 1;
+      const reworkDeadline = calculateReworkDeadline(complaint.priority, new Date());
+      updatedComplaint = await Complaint.findOneAndUpdate(
+        {
+          _id: complaint._id,
+          status: 'Disputed'
+        },
+        {
+          $set: {
+            status: 'In Progress',
+            'resolutionDispute.status': 'returned_in_progress',
+            'resolutionDispute.adminDecision': 'return_in_progress',
+            'resolutionDispute.adminNotes': trimmedNotes,
+            'resolutionDispute.reviewedAt': new Date(),
+            'resolutionDispute.reviewedBy': req.user._id,
+            'sla.reworkDeadline': reworkDeadline,
+            'sla.reworkStartedAt': new Date(),
+            'sla.provisionallyResolvedAt': null,
+            'sla.isReworkBreached': false
+          },
+          $inc: {
+            reworkCount: 1
+          },
+          $push: {
+            statusHistory: {
+              status: 'In Progress',
+              timestamp: new Date(),
+              comment: `Admin reopened complaint for rework (Rework #${nextReworkCount}). Reason: ${trimmedNotes}`,
+              actor: req.user._id,
+              actorRole: 'admin'
+            }
+          }
+        },
+        { new: true, runValidators: true }
+      );
+
+      if (!updatedComplaint) {
+        return res.status(409).json({
+          error: 'Conflict',
+          message: 'Complaint is no longer in disputed status or was concurrently modified by another process.'
+        });
+      }
+
+      // Notify officer and citizen
+      if (updatedComplaint.assignedOfficer) {
+        await sendNotification({
+          recipient: updatedComplaint.assignedOfficer,
+          actor: req.user._id,
+          actorRole: 'admin',
+          complaint: updatedComplaint._id,
+          trackingId: updatedComplaint.trackingId,
+          type: 'resolution_reopened',
+          title: 'Complaint Reopened for Rework',
+          message: `Administrator has reopened complaint "${updatedComplaint.title}" (${updatedComplaint.trackingId}) for rework. Reason: ${trimmedNotes}`
+        });
+      }
+
+      await sendNotification({
+        recipient: updatedComplaint.citizen,
+        actor: req.user._id,
+        actorRole: 'admin',
+        complaint: updatedComplaint._id,
+        trackingId: updatedComplaint.trackingId,
+        type: 'status_changed',
+        title: 'Complaint Reopened for Further Work',
+        message: `Administrator has reviewed your dispute on complaint "${updatedComplaint.title}" (${updatedComplaint.trackingId}) and returned the complaint to In Progress for further officer action. Notes: ${trimmedNotes}`
+      });
+
+      return res.status(200).json({
+        message: 'Dispute reviewed: Complaint reopened and returned to In Progress for rework.',
+        complaint: updatedComplaint.toSafeObject(req.user)
+      });
+    }
   } catch (error) {
     next(error);
   }
@@ -1420,6 +2758,15 @@ router.patch('/:id/assign', authorize('admin'), async (req, res, next) => {
       actor: req.user._id,
       actorRole: 'admin'
     });
+
+    // SLA Milestone Tracking
+    if (!complaint.sla) complaint.sla = {};
+    if (!complaint.sla.assignedAt) {
+      complaint.sla.assignedAt = new Date();
+    }
+    if (!complaint.sla.acknowledgedAt) {
+      complaint.sla.acknowledgedAt = new Date();
+    }
 
     await complaint.save();
 
@@ -1528,6 +2875,29 @@ router.patch('/:id/status', authorize('officer', 'admin'), async (req, res, next
       });
     }
 
+    // CivicTrack 2.0 Hybrid Approval Lifecycle Guards:
+    // Generic status updates cannot be used to trigger or advance provisional resolution workflows
+    if (newStatus === 'Provisionally Resolved') {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: "Transition to 'Provisionally Resolved' requires submission of geo-verified completion evidence via the work completion workflow."
+      });
+    }
+
+    if (newStatus === 'Disputed') {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: "Transition to 'Disputed' can only be initiated by the citizen via the dispute submission workflow."
+      });
+    }
+
+    if (currentStatus === 'Provisionally Resolved' || currentStatus === 'Disputed') {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: `Complaints in '${currentStatus}' status can only be transitioned via citizen confirmation, citizen dispute, or administrative review workflows.`
+      });
+    }
+
     const allowedNextStatuses = PERMITTED_TRANSITIONS[currentStatus] || [];
     if (!allowedNextStatuses.includes(newStatus)) {
       return res.status(400).json({
@@ -1567,6 +2937,22 @@ router.patch('/:id/status', authorize('officer', 'admin'), async (req, res, next
       actor: req.user._id,
       actorRole: req.user.role
     });
+
+    // SLA Milestone Tracking
+    if (!complaint.sla) complaint.sla = {};
+    if (newStatus === 'Under Review' && !complaint.sla.acknowledgedAt) {
+      complaint.sla.acknowledgedAt = new Date();
+    } else if (newStatus === 'In Progress' && !complaint.sla.workStartedAt) {
+      complaint.sla.workStartedAt = new Date();
+    } else if (newStatus === 'Rejected') {
+      complaint.sla.stoppedAt = new Date();
+      complaint.sla.isResolvedWithinSla = false;
+    } else if (newStatus === 'Resolved') {
+      const resDeadline = complaint.sla.resolutionDeadline ? new Date(complaint.sla.resolutionDeadline) : null;
+      complaint.sla.isResolvedWithinSla = resDeadline ? (new Date() <= resDeadline) : true;
+      const startMs = complaint.sla.startedAt ? new Date(complaint.sla.startedAt).getTime() : new Date(complaint.createdAt).getTime();
+      complaint.sla.totalResolutionDurationMs = new Date().getTime() - startMs;
+    }
 
     await complaint.save();
 
@@ -1645,26 +3031,21 @@ router.patch('/:id/resolution', authorize('officer', 'admin'), async (req, res, 
 
     complaint.resolutionNotes = resolutionNotes.trim();
 
-    // If requested and complaint is In Progress, advance to Resolved
+    // CivicTrack 2.0 Guard: Direct resolution from In Progress is prevented
     if (markResolved && complaint.status === 'In Progress') {
-      complaint.status = 'Resolved';
-      complaint.resolvedAt = new Date();
-      complaint.statusHistory.push({
-        status: 'Resolved',
-        timestamp: new Date(),
-        comment: `Resolution recorded: ${complaint.resolutionNotes}`,
-        actor: req.user._id,
-        actorRole: req.user.role
-      });
-    } else {
-      complaint.statusHistory.push({
-        status: complaint.status,
-        timestamp: new Date(),
-        comment: `Resolution notes updated: ${complaint.resolutionNotes}`,
-        actor: req.user._id,
-        actorRole: req.user.role
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: "Direct resolution from 'In Progress' is not permitted. Officers must submit geo-verified completion evidence for provisional resolution."
       });
     }
+
+    complaint.statusHistory.push({
+      status: complaint.status,
+      timestamp: new Date(),
+      comment: `Resolution notes updated: ${complaint.resolutionNotes}`,
+      actor: req.user._id,
+      actorRole: req.user.role
+    });
 
     await complaint.save();
 
