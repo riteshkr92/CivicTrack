@@ -49,19 +49,19 @@ if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const cleanExt = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext) ? ext : '.jpg';
-    const prefix = file.fieldname === 'completionPhoto'
-      ? 'completion'
-      : file.fieldname === 'disputePhoto'
-      ? 'dispute'
-      : 'evidence';
-    cb(null, `${prefix}-${Date.now()}-${crypto.randomBytes(8).toString('hex')}${cleanExt}`);
+// Upload kill switch: uploads permitted only when EVIDENCE_UPLOADS_ENABLED === 'true'
+const checkUploadsEnabled = (req, res, next) => {
+  if (process.env.EVIDENCE_UPLOADS_ENABLED !== 'true') {
+    res.setHeader('Retry-After', '30');
+    return res.status(503).json({
+      error: 'Service Unavailable',
+      message: 'Evidence uploads are temporarily disabled by administrator policy.'
+    });
   }
-});
+  next();
+};
+
+const storage = multer.memoryStorage();
 
 const upload = multer({
   storage,
@@ -87,30 +87,10 @@ const isPathInsideDirectory = (baseDir, targetPath) => {
   return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
 };
 
-// Safe disk cleanup helper for newly uploaded multipart files on request rejection/failure
+// Safe memory cleanup helper on request rejection/failure
 const cleanupUploadedFiles = (req) => {
-  const filePaths = [];
-  if (req.file && req.file.path) filePaths.push(req.file.path);
-  if (req.files) {
-    if (Array.isArray(req.files)) {
-      req.files.forEach((f) => f && f.path && filePaths.push(f.path));
-    } else if (typeof req.files === 'object') {
-      Object.values(req.files).forEach((arr) => {
-        if (Array.isArray(arr)) {
-          arr.forEach((f) => f && f.path && filePaths.push(f.path));
-        }
-      });
-    }
-  }
-  const uniquePaths = [...new Set(filePaths)];
-  for (const fp of uniquePaths) {
-    if (fs.existsSync(fp)) {
-      try {
-        fs.unlinkSync(fp);
-      } catch (err) {
-        console.error(`Failed to clean up temporary upload file ${fp}:`, err.message);
-      }
-    }
+  if (req.file) {
+    req.file.buffer = null;
   }
 };
 
@@ -230,8 +210,8 @@ const handleDisputeUpload = (req, res, next) => {
  * @desc    Submit a new civic complaint with mandatory geotagged photo evidence
  * @access  Protected (Authenticated Citizen)
  */
-router.post('/', handleUpload, async (req, res, next) => {
-  let uploadedFilePath = req.file ? req.file.path : null;
+router.post('/', checkUploadsEnabled, handleUpload, async (req, res, next) => {
+  let uploadedStorageKey = null;
   try {
     const {
       title,
@@ -254,7 +234,6 @@ router.post('/', handleUpload, async (req, res, next) => {
 
     // 1. Validate Title
     if (!title || typeof title !== 'string' || title.trim().length < 3) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) fs.unlinkSync(uploadedFilePath);
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Title is required and must be at least 3 characters long.'
@@ -262,7 +241,6 @@ router.post('/', handleUpload, async (req, res, next) => {
     }
     const trimmedTitle = title.trim();
     if (trimmedTitle.length > 150) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) fs.unlinkSync(uploadedFilePath);
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Title cannot exceed 150 characters.'
@@ -271,7 +249,6 @@ router.post('/', handleUpload, async (req, res, next) => {
 
     // 2. Validate Description
     if (!description || typeof description !== 'string' || description.trim().length < 10) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) fs.unlinkSync(uploadedFilePath);
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Description is required and must be at least 10 characters long.'
@@ -279,7 +256,6 @@ router.post('/', handleUpload, async (req, res, next) => {
     }
     const trimmedDescription = description.trim();
     if (trimmedDescription.length > 2000) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) fs.unlinkSync(uploadedFilePath);
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Description cannot exceed 2000 characters.'
@@ -288,7 +264,6 @@ router.post('/', handleUpload, async (req, res, next) => {
 
     // 3. Validate Category
     if (!category || typeof category !== 'string' || !VALID_CATEGORIES.includes(category.trim())) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) fs.unlinkSync(uploadedFilePath);
       return res.status(400).json({
         error: 'Bad Request',
         message: `Invalid category. Must be one of: ${VALID_CATEGORIES.join(', ')}`
@@ -304,11 +279,13 @@ router.post('/', handleUpload, async (req, res, next) => {
     let fileSize = 0;
 
     if (req.file) {
-      storageFilename = req.file.filename;
-      originalName = req.file.originalname;
-      fileMime = req.file.mimetype;
-      fileSize = req.file.size;
-      fileBuffer = fs.readFileSync(req.file.path);
+      fileBuffer = req.file.buffer;
+      originalName = req.file.originalname || 'issue-photo.jpg';
+      fileMime = req.file.mimetype || 'image/jpeg';
+      fileSize = req.file.size || (fileBuffer ? fileBuffer.length : 0);
+      const ext = path.extname(originalName).toLowerCase();
+      const cleanExt = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext) ? ext : '.jpg';
+      storageFilename = `evidence-${Date.now()}-${crypto.randomBytes(8).toString('hex')}${cleanExt}`;
     } else if (photoBase64 || (typeof photo === 'string' && photo.startsWith('data:image/'))) {
       const rawBase64 = photoBase64 || photo;
       const matches = rawBase64.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
@@ -318,8 +295,6 @@ router.post('/', handleUpload, async (req, res, next) => {
         fileSize = fileBuffer.length;
         const ext = matches && matches[1].includes('png') ? '.png' : matches && matches[1].includes('webp') ? '.webp' : '.jpg';
         storageFilename = `evidence-${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
-        uploadedFilePath = path.join(UPLOAD_DIR, storageFilename);
-        fs.writeFileSync(uploadedFilePath, fileBuffer);
         fileMime = matches ? matches[1] : 'image/jpeg';
       } catch (e) {
         return res.status(400).json({
@@ -337,9 +312,6 @@ router.post('/', handleUpload, async (req, res, next) => {
     // Validate file magic bytes
     const detectedMime = validateImageMagicBytes(fileBuffer);
     if (!detectedMime) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        fs.unlinkSync(uploadedFilePath);
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Uploaded file is not a valid image format (JPEG, PNG, or WebP required).'
@@ -367,9 +339,6 @@ router.post('/', handleUpload, async (req, res, next) => {
     }
 
     if (evLat === null || isNaN(evLat) || evLat < -90 || evLat > 90 || evLng === null || isNaN(evLng) || evLng < -180 || evLng > 180) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        fs.unlinkSync(uploadedFilePath);
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Valid geotagged location coordinates (latitude between -90 and 90, longitude between -180 and 180) are required for the evidence photograph.'
@@ -381,9 +350,6 @@ router.post('/', handleUpload, async (req, res, next) => {
     if (evidenceCapturedAt) {
       const parsedDate = new Date(evidenceCapturedAt);
       if (isNaN(parsedDate.getTime()) || parsedDate.getTime() > Date.now() + 60000 || parsedDate.getFullYear() < 2000) {
-        if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-          fs.unlinkSync(uploadedFilePath);
-        }
         return res.status(400).json({
           error: 'Bad Request',
           message: 'Evidence capture timestamp is malformed, in the future, or invalid.'
@@ -470,7 +436,22 @@ router.post('/', handleUpload, async (req, res, next) => {
     // 9. Generate server-controlled tracking reference
     const trackingId = await Complaint.generateTrackingId();
 
-    // 10. Build and save Complaint
+    // 10. Compute SHA-256 from exact uploaded bytes
+    const fileSha256 = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+
+    // 11. Upload to Supabase Storage
+    try {
+      const uploadResult = await storageService.uploadFile(storageFilename, fileBuffer, detectedMime);
+      uploadedStorageKey = uploadResult.key || storageFilename;
+    } catch (storageErr) {
+      res.setHeader('Retry-After', '30');
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        message: 'Evidence storage service is temporarily unreachable. Please retry shortly.'
+      });
+    }
+
+    // 12. Build and save Complaint
     const assignedPriority = (req.body.priority && ['Low', 'Medium', 'High', 'Urgent'].includes(req.body.priority))
       ? req.body.priority
       : 'Medium';
@@ -494,6 +475,7 @@ router.post('/', handleUpload, async (req, res, next) => {
       evidence: {
         imageUrl: `/api/complaints/${trackingId}/evidence`,
         storageKey: storageFilename,
+        sha256: fileSha256,
         originalFilename: path.basename(originalName).substring(0, 100),
         originalName: path.basename(originalName).substring(0, 100),
         mimetype: detectedMime,
@@ -548,18 +530,24 @@ router.post('/', handleUpload, async (req, res, next) => {
       ]
     });
 
-    await complaint.save();
+    try {
+      await complaint.save();
+    } catch (dbErr) {
+      if (uploadedStorageKey) {
+        try {
+          await storageService.deleteFile(uploadedStorageKey);
+        } catch (cleanupErr) {
+          console.error(`Failed to clean up uploaded file ${uploadedStorageKey} after DB error:`, cleanupErr.message);
+        }
+      }
+      throw dbErr;
+    }
 
     return res.status(201).json({
       message: 'Complaint submitted successfully with verified photo evidence',
       complaint: complaint.toSafeObject()
     });
   } catch (error) {
-    if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-      try {
-        fs.unlinkSync(uploadedFilePath);
-      } catch (cleanupErr) {}
-    }
     if (error.name === 'ValidationError') {
       const messages = Object.values(error.errors).map((err) => err.message);
       return res.status(400).json({
@@ -1800,8 +1788,8 @@ router.get('/:id/dispute-evidence', async (req, res, next) => {
  * @desc    Submit geo-verified work completion evidence by assigned officer
  * @access  Protected (Assigned Officer only)
  */
-router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, async (req, res, next) => {
-  let uploadedFilePath = req.file ? req.file.path : null;
+router.post('/:id/complete-work', checkUploadsEnabled, authorize('officer'), handleCompletionUpload, async (req, res, next) => {
+  let uploadedStorageKey = null;
 
   try {
     const { id } = req.params;
@@ -1812,9 +1800,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
       : await Complaint.findOne({ trackingId: id.trim().toUpperCase() });
 
     if (!complaint) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(404).json({
         error: 'Not Found',
         message: 'Complaint not found.'
@@ -1823,9 +1808,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
 
     // 2. Assignment Authorization Check
     if (!complaint.assignedOfficer || !complaint.assignedOfficer.equals(req.user._id)) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(403).json({
         error: 'Forbidden',
         message: 'Access denied. You are not assigned to this complaint.'
@@ -1834,9 +1816,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
 
     // 3. Status Check: must be 'In Progress'
     if (complaint.status !== 'In Progress') {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: `Cannot submit completion evidence. Complaint status must be 'In Progress' (current status: '${complaint.status}').`
@@ -1847,9 +1826,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
     const { resolutionNotes, latitude, longitude, accuracy, capturedAt, completionPhotoBase64, photoBase64 } = req.body;
 
     if (!resolutionNotes || typeof resolutionNotes !== 'string' || resolutionNotes.trim().length < 10) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Resolution notes are required and must be at least 10 characters long.'
@@ -1857,9 +1833,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
     }
 
     if (resolutionNotes.trim().length > 2000) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Resolution notes cannot exceed 2000 characters.'
@@ -1868,9 +1841,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
 
     // 5. Validate Device Coordinates
     if (latitude === undefined || latitude === null || latitude === '' || isNaN(Number(latitude))) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Valid GPS latitude between -90 and 90 is required.'
@@ -1878,9 +1848,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
     }
     const latNum = Number(latitude);
     if (latNum < -90 || latNum > 90) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'GPS latitude must be between -90 and 90 degrees.'
@@ -1888,9 +1855,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
     }
 
     if (longitude === undefined || longitude === null || longitude === '' || isNaN(Number(longitude))) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Valid GPS longitude between -180 and 180 is required.'
@@ -1898,9 +1862,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
     }
     const lngNum = Number(longitude);
     if (lngNum < -180 || lngNum > 180) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'GPS longitude must be between -180 and 180 degrees.'
@@ -1909,9 +1870,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
 
     // 6. Validate Accuracy (finite, positive, <= 100 meters)
     if (accuracy === undefined || accuracy === null || accuracy === '' || isNaN(Number(accuracy))) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Valid GPS accuracy in metres is required.'
@@ -1919,18 +1877,12 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
     }
     const accNum = Number(accuracy);
     if (!isFinite(accNum) || accNum <= 0) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'GPS accuracy must be a positive finite number.'
       });
     }
     if (accNum > 100) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: `GPS accuracy is insufficient (${accNum}m). Accuracy of 100 metres or better is required.`
@@ -1939,9 +1891,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
 
     // 7. Validate Capture Timestamp (valid, not >60s future, not >24h old)
     if (!capturedAt) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Capture timestamp (capturedAt) is required.'
@@ -1950,9 +1899,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
     const captureDate = new Date(capturedAt);
     const timeVal = captureDate.getTime();
     if (isNaN(timeVal)) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Capture timestamp (capturedAt) is invalid or malformed.'
@@ -1960,18 +1906,12 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
     }
     const now = Date.now();
     if (timeVal > now + 60 * 1000) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Capture timestamp cannot be in the future (exceeds permitted clock skew of 60 seconds).'
       });
     }
     if (timeVal < now - 24 * 60 * 60 * 1000) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Capture timestamp cannot be older than 24 hours.'
@@ -1986,9 +1926,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
       (typeof req.body.completionPhoto === 'string' && req.body.completionPhoto.startsWith('data:image/')) ||
       (typeof req.body.photo === 'string' && req.body.photo.startsWith('data:image/'))
     ) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: "Base64 photograph submissions are not permitted for work completion. A mandatory multipart 'completionPhoto' file must be uploaded."
@@ -2002,17 +1939,12 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
       });
     }
 
-    let fileBuffer = fs.readFileSync(req.file.path);
-    let storageFilename = req.file.filename;
-    let originalName = req.file.originalname;
-    let fileMime = req.file.mimetype;
-    let fileSize = req.file.size;
+    const fileBuffer = req.file.buffer;
+    const originalName = req.file.originalname || 'completion-photo.jpg';
+    const fileSize = req.file.size || fileBuffer.length;
 
     // Check size <= 10MB
     if (fileSize > 10 * 1024 * 1024) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Uploaded completion photograph exceeds the maximum permitted size of 10MB.'
@@ -2022,37 +1954,25 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
     // Check magic bytes
     const detectedMime = validateImageMagicBytes(fileBuffer);
     if (!detectedMime) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Uploaded file is not a valid image format (genuine JPEG, PNG, or WebP required).'
       });
     }
 
-    // 9. Duplicate Image Content Check (SHA-256)
+    // 9. Anti-Fraud SHA-256 Check against original complaint evidence
     const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-    if (complaint.evidence?.storageKey) {
-      const origSafeKey = path.basename(complaint.evidence.storageKey);
-      const origPath = path.resolve(UPLOAD_DIR, origSafeKey);
-      if (fs.existsSync(origPath)) {
-        try {
-          const origBuffer = fs.readFileSync(origPath);
-          const origHash = crypto.createHash('sha256').update(origBuffer).digest('hex');
-          if (origHash === fileHash) {
-            if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-              try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-            }
-            return res.status(400).json({
-              error: 'Bad Request',
-              message: 'Completion photograph matches the original complaint photograph. A genuine photo of completed work is required.'
-            });
-          }
-        } catch (e) {
-          // non-blocking
-        }
-      }
+    if (!complaint.evidence || !complaint.evidence.sha256) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Original evidence hash is missing on record. Fraud verification cannot proceed.'
+      });
+    }
+    if (complaint.evidence.sha256 === fileHash) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Completion photograph matches the original complaint photograph. A genuine photo of completed work is required.'
+      });
     }
 
     // 10. Check Original Complaint GPS Coordinates
@@ -2069,9 +1989,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
       !isNaN(origLng);
 
     if (!hasOrigCoords) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Original complaint does not contain valid GPS coordinates. Distance verification cannot be performed.'
@@ -2085,9 +2002,6 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
 
     const distanceMeters = calculateDistanceMeters(Number(origLat), Number(origLng), latNum, lngNum);
     if (distanceMeters === null || distanceMeters > toleranceMeters) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
-      }
       return res.status(400).json({
         error: 'Bad Request',
         message: `Completion location is ${distanceMeters}m away from the original complaint location, which exceeds the permitted tolerance of ${toleranceMeters}m.`
@@ -2132,10 +2046,27 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
       }
     }
 
+    // Generate safe storage filename and upload to Supabase Storage
+    const ext = path.extname(originalName).toLowerCase();
+    const cleanExt = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext) ? ext : '.jpg';
+    const storageFilename = `completion-${Date.now()}-${crypto.randomBytes(8).toString('hex')}${cleanExt}`;
+
+    try {
+      const uploadResult = await storageService.uploadFile(storageFilename, fileBuffer, detectedMime);
+      uploadedStorageKey = uploadResult.key || storageFilename;
+    } catch (storageErr) {
+      res.setHeader('Retry-After', '30');
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        message: 'Evidence storage service is temporarily unreachable. Please retry shortly.'
+      });
+    }
+
     // 13. Construct Completion Evidence Object
     const completionEvidenceData = {
       imageUrl: `/api/complaints/${complaint._id}/completion-evidence`,
       storageKey: storageFilename,
+      sha256: fileHash,
       originalFilename: originalName,
       originalName: originalName,
       mimetype: detectedMime,
@@ -2160,34 +2091,42 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
     };
 
     // 14. Atomic State Transition (prevent concurrent double-completions)
-    const updatedComplaint = await Complaint.findOneAndUpdate(
-      {
-        _id: complaint._id,
-        status: 'In Progress'
-      },
-      {
-        $set: {
-          status: 'Provisionally Resolved',
-          completionEvidence: completionEvidenceData,
-          resolutionNotes: resolutionNotes.trim(),
-          'sla.provisionallyResolvedAt': new Date()
+    let updatedComplaint;
+    try {
+      updatedComplaint = await Complaint.findOneAndUpdate(
+        {
+          _id: complaint._id,
+          status: 'In Progress'
         },
-        $push: {
-          statusHistory: {
+        {
+          $set: {
             status: 'Provisionally Resolved',
-            timestamp: new Date(),
-            comment: `Work completed by officer. Geo-verified within ${distanceMeters}m (tolerance: ${toleranceMeters}m). Notes: ${resolutionNotes.trim().slice(0, 150)}`,
-            actor: req.user._id,
-            actorRole: 'officer'
+            completionEvidence: completionEvidenceData,
+            resolutionNotes: resolutionNotes.trim(),
+            'sla.provisionallyResolvedAt': new Date()
+          },
+          $push: {
+            statusHistory: {
+              status: 'Provisionally Resolved',
+              timestamp: new Date(),
+              comment: `Work completed by officer. Geo-verified within ${distanceMeters}m (tolerance: ${toleranceMeters}m). Notes: ${resolutionNotes.trim().slice(0, 150)}`,
+              actor: req.user._id,
+              actorRole: 'officer'
+            }
           }
-        }
-      },
-      { new: true, runValidators: true }
-    );
+        },
+        { new: true, runValidators: true }
+      );
+    } catch (dbErr) {
+      if (uploadedStorageKey) {
+        try { await storageService.deleteFile(uploadedStorageKey); } catch (_) {}
+      }
+      throw dbErr;
+    }
 
     if (!updatedComplaint) {
-      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-        try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+      if (uploadedStorageKey) {
+        try { await storageService.deleteFile(uploadedStorageKey); } catch (_) {}
       }
       return res.status(409).json({
         error: 'Conflict',
@@ -2212,7 +2151,9 @@ router.post('/:id/complete-work', authorize('officer'), handleCompletionUpload, 
       complaint: updatedComplaint.toSafeObject(req.user)
     });
   } catch (error) {
-    cleanupUploadedFiles(req);
+    if (uploadedStorageKey) {
+      try { await storageService.deleteFile(uploadedStorageKey); } catch (_) {}
+    }
     next(error);
   }
 });
@@ -2331,8 +2272,8 @@ router.patch('/:id/confirm-resolution', authorize('citizen'), async (req, res, n
  * @desc    Citizen disputes provisional resolution with mandatory reason and optional photographic evidence
  * @access  Protected (Complaint Owner Citizen only)
  */
-router.post('/:id/dispute', authorize('citizen'), handleDisputeUpload, async (req, res, next) => {
-  let uploadedFilePath = req.file ? req.file.path : null;
+router.post('/:id/dispute', checkUploadsEnabled, authorize('citizen'), handleDisputeUpload, async (req, res, next) => {
+  let uploadedStorageKey = null;
 
   try {
     const { id } = req.params;
@@ -2385,10 +2326,10 @@ router.post('/:id/dispute', authorize('citizen'), handleDisputeUpload, async (re
       });
     }
 
-    // Optional Dispute Photograph Validation
+    // Optional Dispute Photograph Validation & Supabase Upload
     let disputePhotoData = null;
     if (req.file) {
-      const fileBuffer = fs.readFileSync(req.file.path);
+      const fileBuffer = req.file.buffer;
       const isValidFormat = validateImageMagicBytes(fileBuffer);
       if (!isValidFormat) {
         cleanupUploadedFiles(req);
@@ -2398,14 +2339,31 @@ router.post('/:id/dispute', authorize('citizen'), handleDisputeUpload, async (re
         });
       }
 
-      const storageFilename = path.basename(req.file.path);
       const originalName = req.file.originalname || 'dispute-evidence.jpg';
+      const ext = path.extname(originalName).toLowerCase();
+      const cleanExt = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext) ? ext : '.jpg';
+      const storageFilename = `dispute-${Date.now()}-${crypto.randomBytes(8).toString('hex')}${cleanExt}`;
       const detectedMime = req.file.mimetype || 'image/jpeg';
-      const fileSize = req.file.size;
+      const fileSize = req.file.size || fileBuffer.length;
+      const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+
+      try {
+        const uploadResult = await storageService.uploadFile(storageFilename, fileBuffer, detectedMime);
+        uploadedStorageKey = uploadResult.key || storageFilename;
+      } catch (storageErr) {
+        console.error('[ComplaintRoutes] Supabase upload failed for dispute evidence:', storageErr);
+        cleanupUploadedFiles(req);
+        res.setHeader('Retry-After', '30');
+        return res.status(503).json({
+          error: 'Service Unavailable',
+          message: 'Evidence storage service is temporarily unreachable. Please retry shortly.'
+        });
+      }
 
       disputePhotoData = {
         imageUrl: `/api/complaints/${complaint._id}/dispute-evidence`,
         storageKey: storageFilename,
+        sha256: fileHash,
         originalName: originalName,
         mimeType: detectedMime,
         sizeBytes: fileSize,
@@ -2449,6 +2407,11 @@ router.post('/:id/dispute', authorize('citizen'), handleDisputeUpload, async (re
     );
 
     if (!updatedComplaint) {
+      if (uploadedStorageKey) {
+        await storageService.deleteFile(uploadedStorageKey).catch(delErr => {
+          console.error('[ComplaintRoutes] Failed to cleanup uploaded dispute evidence on conflict:', delErr);
+        });
+      }
       cleanupUploadedFiles(req);
       return res.status(409).json({
         error: 'Conflict',
@@ -2489,6 +2452,11 @@ router.post('/:id/dispute', authorize('citizen'), handleDisputeUpload, async (re
       complaint: updatedComplaint.toSafeObject(req.user)
     });
   } catch (error) {
+    if (uploadedStorageKey) {
+      await storageService.deleteFile(uploadedStorageKey).catch(delErr => {
+        console.error('[ComplaintRoutes] Failed to cleanup uploaded dispute evidence on error:', delErr);
+      });
+    }
     cleanupUploadedFiles(req);
     next(error);
   }

@@ -7,10 +7,23 @@ const User = require('../models/User');
 const generateToken = require('../utils/generateToken');
 const { authenticate, authorize } = require('../middleware/authMiddleware');
 const storageService = require('../services/storageService');
+const { validateImageMagicBytes } = require('../utils/exifParser');
 
 const router = express.Router();
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Upload kill switch: uploads permitted only when EVIDENCE_UPLOADS_ENABLED === 'true'
+const checkUploadsEnabled = (req, res, next) => {
+  if (process.env.EVIDENCE_UPLOADS_ENABLED !== 'true') {
+    res.setHeader('Retry-After', '30');
+    return res.status(503).json({
+      error: 'Service Unavailable',
+      message: 'Evidence uploads are temporarily disabled by administrator policy.'
+    });
+  }
+  next();
+};
 
 // Upload directory configuration for user avatars
 const rawUploadDir = process.env.UPLOAD_DIR || 'uploads';
@@ -30,15 +43,8 @@ const isPathInsideDirectory = (baseDir, targetPath) => {
   return !relative.startsWith('..') && !path.isAbsolute(relative);
 };
 
-// Avatar multer configuration
-const avatarStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const cleanExt = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext) ? ext : '.jpg';
-    cb(null, `avatar-${req.user._id}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}${cleanExt}`);
-  }
-});
+// Avatar multer configuration using memory storage
+const avatarStorage = multer.memoryStorage();
 
 const uploadAvatarMiddleware = multer({
   storage: avatarStorage,
@@ -643,9 +649,15 @@ router.patch('/notifications/preferences', authenticate, async (req, res, next) 
  * @desc    Upload profile picture for authenticated user
  * @access  Protected
  */
-router.post('/profile/avatar', authenticate, (req, res, next) => {
+router.post('/profile/avatar', checkUploadsEnabled, authenticate, (req, res, next) => {
   uploadAvatarMiddleware.single('avatar')(req, res, async (err) => {
     if (err) {
+      if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Avatar file size exceeds the 5MB limit.'
+        });
+      }
       return res.status(400).json({
         error: 'Bad Request',
         message: err.message
@@ -658,6 +670,15 @@ router.post('/profile/avatar', authenticate, (req, res, next) => {
       });
     }
 
+    const fileBuffer = req.file.buffer;
+    const detectedMime = validateImageMagicBytes(fileBuffer);
+    if (!detectedMime) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Uploaded file is not a valid image format (genuine JPEG, PNG, or WebP required).'
+      });
+    }
+
     try {
       const user = await User.findById(req.user._id);
       if (!user) {
@@ -667,18 +688,42 @@ router.post('/profile/avatar', authenticate, (req, res, next) => {
         });
       }
 
-      // Clean up previous avatar file if exists
-      if (user.avatar) {
-        const oldPath = path.resolve(UPLOAD_DIR, user.avatar);
-        if (isPathInsideDirectory(UPLOAD_DIR, oldPath) && fs.existsSync(oldPath)) {
-          try {
-            fs.unlinkSync(oldPath);
-          } catch (_) {}
-        }
+      const ext = path.extname(req.file.originalname || '').toLowerCase();
+      const cleanExt = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext) ? ext : '.jpg';
+      const safeAvatarKey = `avatar-${user._id}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}${cleanExt}`;
+
+      let uploadedStorageKey = null;
+      try {
+        const uploadResult = await storageService.uploadFile(safeAvatarKey, fileBuffer, detectedMime);
+        uploadedStorageKey = uploadResult.key || safeAvatarKey;
+      } catch (storageErr) {
+        res.setHeader('Retry-After', '30');
+        return res.status(503).json({
+          error: 'Service Unavailable',
+          message: 'Avatar storage service is temporarily unreachable. Please retry shortly.'
+        });
       }
 
-      user.avatar = req.file.filename;
-      await user.save();
+      const previousAvatar = user.avatar;
+      user.avatar = safeAvatarKey;
+
+      try {
+        await user.save();
+      } catch (dbErr) {
+        if (uploadedStorageKey) {
+          try { await storageService.deleteFile(uploadedStorageKey); } catch (_) {}
+        }
+        throw dbErr;
+      }
+
+      // Replacement upload: Delete previous avatar only after DB update succeeds
+      if (previousAvatar && previousAvatar !== safeAvatarKey && previousAvatar.startsWith('avatar-')) {
+        try {
+          await storageService.deleteFile(previousAvatar);
+        } catch (delErr) {
+          console.error(`Failed to delete previous avatar ${previousAvatar}:`, delErr.message);
+        }
+      }
 
       return res.status(200).json({
         message: 'Profile avatar uploaded successfully.',
