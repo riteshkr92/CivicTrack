@@ -329,7 +329,7 @@ export default function DashboardView() {
                       <span>Citizen Services Workspace</span>
                     </div>
                     <h1 className="citizen-hero-title">
-                      {user?.name ? `Welcome back, ${user.name}` : 'Welcome to Citizen Services'}
+                      {user?.name ? `Welcome Change back, ${user.name}` : 'Welcome to Citizen Services'}
                     </h1>
                     <p className="citizen-hero-description">
                       Report civic infrastructure issues in your neighborhood, track resolution milestones in real time, and monitor municipal department responses.
@@ -891,15 +891,15 @@ export default function DashboardView() {
                     {role === 'citizen'
                       ? 'City Issue Map & Geotagged Incidents'
                       : role === 'officer'
-                      ? 'Field & Ward Map Operations'
-                      : 'Municipal Geographic Command Center'}
+                        ? 'Field & Ward Map Operations'
+                        : 'Municipal Geographic Command Center'}
                   </h2>
                   <p className="map-view-subtitle">
                     {role === 'citizen'
                       ? 'Interactive geographic visualization of your submitted civic complaints with verified GPS coordinates and live resolution statuses.'
                       : role === 'officer'
-                      ? 'Geographic view of assigned field complaints in your department jurisdiction with verified GPS coordinates.'
-                      : 'City-wide geographic map of reported civic issues across all municipal departments and wards.'}
+                        ? 'Geographic view of assigned field complaints in your department jurisdiction with verified GPS coordinates.'
+                        : 'City-wide geographic map of reported civic issues across all municipal departments and wards.'}
                   </p>
                 </div>
                 <div className="map-view-actions">
@@ -991,10 +991,10 @@ export default function DashboardView() {
             {role === 'citizen'
               ? `${citizenSummary.total} Complaint${citizenSummary.total === 1 ? '' : 's'}`
               : role === 'officer'
-              ? `${officerSummary.totalAssigned} Assigned Task${officerSummary.totalAssigned === 1 ? '' : 's'}`
-              : role === 'admin'
-              ? `${adminSummary.total} Total Complaint${adminSummary.total === 1 ? '' : 's'}`
-              : '0 Complaints'}
+                ? `${officerSummary.totalAssigned} Assigned Task${officerSummary.totalAssigned === 1 ? '' : 's'}`
+                : role === 'admin'
+                  ? `${adminSummary.total} Total Complaint${adminSummary.total === 1 ? '' : 's'}`
+                  : '0 Complaints'}
           </span>
         </footer>
       </div>
